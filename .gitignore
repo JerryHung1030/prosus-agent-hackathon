@@ -1,0 +1,21 @@
+# Environment
+.env
+venv/
+*.pyc
+__pycache__/
+
+# Local Data & DB
+db/
+*.db
+*.log
+# data/
+*.csv
+*.json
+
+# OS
+.DS_Store
+
+all_code.txt
+cmd.txt
+informations/
+.ruff_cache/
