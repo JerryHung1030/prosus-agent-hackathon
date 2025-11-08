@@ -1,5 +1,6 @@
 # api.py
 from datetime import datetime, timezone
+import logging
 from typing import Optional, List, Literal, Dict, Any
 
 from fastapi import FastAPI
@@ -80,6 +81,8 @@ def ingest_listings(items: List[ListingIn]):
     - No compare/update: every listing is directly added.
     - Fields with value None will be stored as NULL.
     """
+    # Log that we received N items
+    logging.info("Ingesting %d listings", len(items))
     now = datetime.now(timezone.utc).isoformat()
     inserted = 0
 

@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./images:/images
+    environment:
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  scraper:
+    build:
+      context: .
+      dockerfile: docker/scraper.Dockerfile
+    depends_on:
+      - backend
+    environment:
+      BACKEND_API_URL: http://backend:8000
+      SCRAPER_VERSION: homepilot-docker
+      SLEEP_SECONDS: "300"
+    volumes:
+      - ./images:/images
+    working_dir: /app/
+    command: ["python", "src/main.py"]
+    restart: unless-stopped

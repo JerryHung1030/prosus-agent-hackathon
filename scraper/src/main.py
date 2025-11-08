@@ -9,15 +9,14 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional
 
+import requests
 from dotenv import load_dotenv
 
 from history import History
 from hunters.hunter import Hunter
 from hunters.pararius import Pararius
-from utils.io import read_json_array, write_json_array_atomic
 
 
 ALL_HUNTERS: List[Hunter] = [Pararius()]
@@ -29,6 +28,7 @@ class Config:
     max_price: Optional[int]
     scraper_version: str
     sleep_seconds: int
+    backend_api_url: str
 
 
 def parse_int(name: str, value: Optional[str]) -> Optional[int]:
@@ -46,6 +46,7 @@ def load_config() -> Config:
     max_price = parse_int("MAXIMUM_PRICE", os.getenv("MAXIMUM_PRICE"))
     sleep_seconds = parse_int("SLEEP_SECONDS", os.getenv("SLEEP_SECONDS")) or 0
     scraper_version = os.getenv("SCRAPER_VERSION", "homepilot-0.2")
+    backend_api_url = os.getenv("BACKEND_API_URL", "http://localhost:8000")
 
     if min_price is not None and max_price is not None and min_price > max_price:
         raise ValueError("MINIMUM_PRICE cannot be greater than MAXIMUM_PRICE")
@@ -55,6 +56,7 @@ def load_config() -> Config:
         max_price=max_price,
         scraper_version=scraper_version,
         sleep_seconds=sleep_seconds,
+        backend_api_url=backend_api_url,
     )
 
 
@@ -66,9 +68,44 @@ def setup_logging() -> None:
     )
 
 
-def run_once(config: Config, history: History, results_path: Path) -> None:
+def publish_listing(listing: dict, config: Config) -> bool:
+    listing_id = listing.get("id") or listing.get("url")
+    endpoint = f"{config.backend_api_url.rstrip('/')}/ingest-listings"
+    logging.info("Publishing listing %s to %s", listing_id, endpoint)
+    try:
+        response = requests.post(endpoint, json=[listing], timeout=30)
+    except requests.RequestException:
+        logging.exception("Failed to publish listing %s", listing_id)
+        return False
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if not response.ok:
+        logging.error(
+            "Publishing listing %s failed: status=%s body=%s",
+            listing_id,
+            response.status_code,
+            payload,
+        )
+        return False
+
+    inserted = payload.get("inserted") if isinstance(payload, dict) else None
+    total = payload.get("total") if isinstance(payload, dict) else None
+    logging.info(
+        "Published listing %s successfully (status=%s inserted=%s total=%s)",
+        listing_id,
+        response.status_code,
+        inserted,
+        total,
+    )
+    return True
+
+
+def run_once(config: Config, history: History) -> None:
     known_urls = history.get_all()
-    results = read_json_array(results_path)
 
     for hunter in ALL_HUNTERS:
         try:
@@ -115,11 +152,14 @@ def run_once(config: Config, history: History, results_path: Path) -> None:
             metadata.setdefault("source", hunter.name.lower())
             metadata["scraper_version"] = config.scraper_version
 
-            results.append(listing)
-            write_json_array_atomic(results_path, results)
-            history.add(prey.link)
-            known_urls.add(prey.link)
-            logging.info("Stored listing %s", listing.get("id", prey.link))
+            if publish_listing(listing, config):
+                history.add(prey.link)
+                known_urls.add(prey.link)
+            else:
+                logging.warning(
+                    "Will retry %s later because publishing failed",
+                    listing.get("id", prey.link),
+                )
 
 
 def extract_price_amount(listing: dict) -> Optional[int]:
@@ -147,11 +187,10 @@ def main() -> None:
         sys.exit(2)
 
     history = History("history.txt")
-    results_path = Path("results.json")
 
     try:
         while True:
-            run_once(config, history, results_path)
+            run_once(config, history)
             if args.once:
                 break
             logging.info("Sleeping for %s seconds", config.sleep_seconds)
