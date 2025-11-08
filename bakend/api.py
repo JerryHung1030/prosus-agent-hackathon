@@ -1,14 +1,24 @@
 # api.py
 from datetime import datetime, timezone
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 
 from db import get_connection, init_db
 import json
 
 app = FastAPI(title="Listings API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"], 
+    allow_headers=["*"],
+)
+
 init_db()  # Ensure tables exist on startup
 
 # ---------- Pydantic models ----------
@@ -49,8 +59,20 @@ class ListingIn(BaseModel):
     first_seen: Optional[str] = None  # ISO string
     pets_allowed: Optional[bool] = None
     scrape_meta: Optional[ScrapeMeta] = Field(default=None, alias="scrape_meta")
+    thumbnail_path: Optional[str] = None
 
-# ---------- Ingest endpoint ----------
+class LLMStartIn(BaseModel):
+    status: str = "running"   # default running
+    start_time: Optional[str] = None  # can be passed by LLM, otherwise use current time
+
+
+class LLMFinishIn(BaseModel):
+    job_id: int
+    status: str               # finished / error
+    result: Optional[Dict[str, Any]] = None  # JSON object: {"text": "...", "image_path": "..."}
+    end_time: Optional[str] = None
+
+# ---------- Ingest endpoints ----------
 @app.post("/ingest-listings")
 def ingest_listings(items: List[ListingIn]):
     """
@@ -79,8 +101,8 @@ def ingest_listings(items: List[ListingIn]):
                     contract_start_date, contract_duration_months,
                     agency_name, agency_email,
                     first_seen, pets_allowed, scraper_version,
-                    raw_json, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    thumbnail_path, raw_json, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 it.id,
                 it.url,
@@ -103,6 +125,7 @@ def ingest_listings(items: List[ListingIn]):
                 it.first_seen,
                 1 if it.pets_allowed else 0 if it.pets_allowed is not None else None,
                 meta.scraper_version,
+                it.thumbnail_path,
                 json.dumps(it.model_dump(by_alias=True, exclude_none=True)),
                 now,
                 now,
@@ -139,7 +162,7 @@ def list_listings(
         "contract_start_date", "contract_duration_months",
         "agency_name", "agency_email",
         "first_seen", "pets_allowed",
-        "scraper_version", "created_at", "updated_at"
+        "scraper_version", "thumbnail_path", "created_at", "updated_at"
     ]
     if include_raw:
         cols.append("raw_json")
@@ -200,3 +223,49 @@ def list_listings(
         "items": items,
     }
 
+
+# ---------- LLM Job endpoints ----------
+@app.post("/llm/start")
+def llm_start(data: LLMStartIn):
+    """Start a new LLM job"""
+    start_time = data.start_time or datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO llm_jobs (status, start_time) VALUES (?, ?)",
+            (data.status, start_time),
+        )
+        conn.commit()
+        job_id = cur.lastrowid
+    return {"job_id": job_id, "status": data.status, "start_time": start_time}
+
+
+@app.post("/llm/finish")
+def llm_finish(data: LLMFinishIn):
+    """Update specified LLM job result"""
+    end_time = data.end_time or datetime.now(timezone.utc).isoformat()
+    result_json = json.dumps(data.result) if data.result is not None else None
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE llm_jobs SET status=?, result=?, end_time=? WHERE id=?",
+            (data.status, result_json, end_time, data.job_id),
+        )
+        conn.commit()
+    return {"job_id": data.job_id, "status": data.status, "end_time": end_time}
+
+
+@app.get("/llm/status")
+def llm_status(limit: int = 10):
+    """Query recent job status"""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, status, start_time, result, end_time FROM llm_jobs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    
+    for r in rows:
+        if r["result"] is not None:
+            r["result"] = json.loads(r["result"])
+    return {"count": len(rows), "items": rows}

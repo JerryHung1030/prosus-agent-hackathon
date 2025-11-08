@@ -40,10 +40,21 @@ def init_db():
             first_seen TEXT,
             pets_allowed INTEGER,
             scraper_version TEXT,
+            thumbnail_path TEXT,
             raw_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS llm_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,            
+            start_time TEXT NOT NULL,
+            result TEXT,                    
+            end_time TEXT                    
+        )
+        """)
+
         conn.commit()
     print("Database initialized.")
