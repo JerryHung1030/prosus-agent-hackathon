@@ -4,3 +4,4 @@ pydantic[email]
 numpy
 python-jose[cryptography]
 python-multipart
+httpx

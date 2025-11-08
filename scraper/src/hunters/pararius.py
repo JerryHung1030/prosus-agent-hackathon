@@ -20,7 +20,7 @@ class Pararius(Hunter):
 
     BASE_URL = "https://www.pararius.com"
     LIST_URL = f"{BASE_URL}/apartments/nederland"
-    MAX_PAGES = 10000
+    MAX_PAGES = 10
     TIMEOUT = 30
 
     def __init__(self) -> None:
@@ -134,6 +134,9 @@ class Pararius(Hunter):
         description = self._extract_description(soup)
         if description:
             listing["description"] = description
+
+        # Store HTML content for image extraction
+        listing["_html_content"] = response.text
 
         return listing
 
@@ -338,7 +341,6 @@ class Pararius(Hunter):
         contact_url = None
         if contact_btn and contact_btn.get("href"):
             contact_url = urljoin(self.BASE_URL, contact_btn["href"])
-        logging.info("contact_url=%s", contact_url)
         agency: Dict[str, Any] = {"name": agency_name}
         if email:
             agency["email"] = email

@@ -43,11 +43,30 @@ def init_db():
             pets_allowed INTEGER,
             scraper_version TEXT,
             thumbnail_path TEXT,
+            latitude REAL,
+            longitude REAL,
             raw_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """)
+        
+        # Create geo index for faster radius queries
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_listings_geo ON listings(latitude, longitude)
+        """)
+        
+        # Address geocoding cache to prevent redundant API calls
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS address_cache (
+            address_hash TEXT PRIMARY KEY,
+            address TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+        
         cur.execute("""
         CREATE TABLE IF NOT EXISTS llm_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
