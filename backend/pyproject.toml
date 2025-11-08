@@ -1,0 +1,14 @@
+[project]
+name = "hack"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.121.0",
+    "numpy>=2.3.4",
+    "pydantic[email]>=2.12.4",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.20",
+    "uvicorn[standard]>=0.38.0",
+]
