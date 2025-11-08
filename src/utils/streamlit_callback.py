@@ -1,6 +1,4 @@
 # FILE: ./src/utils/streamlit_callback.py
-# (FIXED Version)
-
 import streamlit as st
 from langchain_core.callbacks import BaseCallbackHandler
 
@@ -51,7 +49,7 @@ class StreamlitCallbackHandler(BaseCallbackHandler):
             st.markdown(f"🏁 **Finished Task**\n\n{finish.return_values.get('output', 'N/A')}")
 
 
-def create_step_callback(handler: StreamlitCallbackHandler, agent_name: str):
+def create_step_callback(handler: StreamlitCallbackHandler | None, agent_name: str):
     """
     Create a callable compatible with CrewAI Agent.step_callback.
 
@@ -60,6 +58,10 @@ def create_step_callback(handler: StreamlitCallbackHandler, agent_name: str):
     """
 
     def _step_callback(*args, **kwargs):  # noqa: ANN001
+        # If no handler provided, silently no-op
+        if handler is None:
+            return
+
         icon = handler.agent_icons.get(agent_name, "🤖")
         with handler.container.chat_message(name=agent_name, avatar=icon):
             payload = None

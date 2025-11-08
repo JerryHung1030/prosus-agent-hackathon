@@ -3,42 +3,72 @@ from typing import Any
 
 from crewai import Crew, Process
 
-from .agents.research_agents import create_research_agent, create_writer_agent
-from .tasks import create_research_task, create_writing_task
-from .utils.streamlit_callback import create_step_callback
+# Import your new agents and tasks
+from .agents.housing_agents import create_apply_agent, create_ranking_agent, create_search_agent
+from .tasks.housing_tasks import (
+    create_housing_apply_task,
+    create_housing_rank_task,
+    create_housing_search_task,
+)
+from .utils.streamlit_callback import StreamlitCallbackHandler, create_step_callback
 
 
-def get_crew(crew_type: str, user_goal: str, streamlit_callback=None):
+def get_crew(
+    crew_type: str,
+    inputs: dict,
+    streamlit_callback: StreamlitCallbackHandler | None = None,
+):
     """
     Factory function to create and configure a Crew based on type.
+    'inputs' is now a dictionary containing all necessary data.
     """
-
-    # Build per-agent step callbacks when we have a Streamlit handler
-    researcher_step_cb = None
-    writer_step_cb = None
-    if streamlit_callback is not None:
-        researcher_step_cb = create_step_callback(streamlit_callback, "researcher_agent")
-        writer_step_cb = create_step_callback(streamlit_callback, "writer_agent")
-
     agents = []
     tasks = []
 
-    if crew_type == "research":
-        # Create agents with their own step callbacks so progress logs render in Streamlit
-        researcher = create_research_agent(step_callback=researcher_step_cb)
-        writer = create_writer_agent(step_callback=writer_step_cb)
+    if crew_type == "housing_search":
+        # --- 1. Create the Housing Search Crew ---
 
-        agents = [researcher, writer]
-        tasks = [create_research_task(researcher), create_writing_task(writer)]
+        # Build callbacks
+        search_cb = create_step_callback(streamlit_callback, "SearchAgent")
+        rank_cb = create_step_callback(streamlit_callback, "RankingAgent")
 
-    # (Future) other crew types could go here
+        # Create agents
+        search_agent = create_search_agent(step_callback=search_cb)
+        ranking_agent = create_ranking_agent(step_callback=rank_cb)
+
+        agents = [search_agent, ranking_agent]
+
+        # Create tasks
+        # We pass the criteria dict (which is inside the 'inputs' dict)
+        criteria = inputs.get("criteria") or {}
+        search_task = create_housing_search_task(search_agent, criteria)
+        rank_task = create_housing_rank_task(ranking_agent, criteria)
+
+        tasks = [search_task, rank_task]
+
+    elif crew_type == "housing_apply":
+        # --- 2. Create the Housing Apply Crew ---
+
+        # Build callback
+        apply_cb = create_step_callback(streamlit_callback, "ApplyAgent")
+
+        # Create agent
+        apply_agent = create_apply_agent(step_callback=apply_cb)
+
+        agents = [apply_agent]
+
+        # Create task
+        user_profile = inputs.get("user_profile") or "{}"
+        listing_details = inputs.get("listing_details") or "{}"
+        apply_task = create_housing_apply_task(apply_agent, user_profile, listing_details)
+
+        tasks = [apply_task]
 
     else:
         raise ValueError(f"Unknown crew_type: {crew_type}")
 
-    # Assemble the crew (agent-level callbacks already wired via step_callback)
+    # Assemble the crew
     agents_any: list[Any] = agents
-
     crew = Crew(
         agents=agents_any,
         tasks=tasks,
@@ -46,6 +76,8 @@ def get_crew(crew_type: str, user_goal: str, streamlit_callback=None):
         verbose=True,
     )
 
-    inputs = {"user_goal": user_goal}
-
-    return crew, inputs
+    # Note: We return the crew, but the 'inputs' dictionary is
+    # now handled by the app, so we don't need to return it.
+    # The 'inputs' for kickoff() will be an empty dict,
+    # because we already embedded the data *into* the task descriptions.
+    return crew, {}

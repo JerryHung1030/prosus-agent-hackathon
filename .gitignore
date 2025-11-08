@@ -19,3 +19,5 @@ all_code.txt
 cmd.txt
 informations/
 .ruff_cache/
+
+outputs/

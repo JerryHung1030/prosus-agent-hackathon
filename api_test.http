@@ -1,0 +1,25 @@
+# VS Code REST Client / HTTP file for manual testing the backend API
+# Usage: Install the "REST Client" extension (humao.rest-client) and click "Send Request" above each request.
+
+@baseUrl = http://136.244.109.212:8000
+# Override host if deployed:
+
+### Basic listings query
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&limit=20
+Accept: application/json
+
+### With explicit min_price
+GET {{baseUrl}}/listings?city=Amsterdam&min_price=800&max_price=1500&min_size=20&limit=20
+Accept: application/json
+
+### With keyword query `q` (optional, backend may ignore empty string)
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&q=&limit=20
+Accept: application/json
+
+### Sort by area (descending)
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&order_by=area_m2&order_dir=desc&limit=20
+Accept: application/json
+
+### Health or root (optional, depends on backend implementation)
+# GET {{baseUrl}}/health
+# Accept: application/json

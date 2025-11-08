@@ -229,6 +229,7 @@ sse-starlette==3.0.3
 stack-data==0.6.3
 starlette==0.50.0
 streamlit==1.51.0
+googlemaps==4.10.0
 sympy==1.14.0
 tenacity==9.1.2
 terminado==0.18.1
