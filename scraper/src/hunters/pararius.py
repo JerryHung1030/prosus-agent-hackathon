@@ -20,7 +20,7 @@ class Pararius(Hunter):
 
     BASE_URL = "https://www.pararius.com"
     LIST_URL = f"{BASE_URL}/apartments/nederland"
-    MAX_PAGES = 1
+    MAX_PAGES = 10000
     TIMEOUT = 30
 
     def __init__(self) -> None:

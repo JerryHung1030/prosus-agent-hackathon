@@ -6,9 +6,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./images:/images
+      - ./backend:/app
+      - ./backend/data:/data
     environment:
       PYTHONUNBUFFERED: "1"
+      DB_PATH: /data/housing.db
     restart: unless-stopped
 
   scraper:
@@ -23,6 +25,15 @@ services:
       SLEEP_SECONDS: "300"
     volumes:
       - ./images:/images
+      - ./backend/data:/data   
     working_dir: /app/
     command: ["python", "src/main.py"]
     restart: unless-stopped
+
+  datasette:
+    image: datasetteproject/datasette
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend/data:/data   # ✅ same data volume
+    command: ["datasette", "serve", "/data/housing.db", "--host", "0.0.0.0", "--port", "8001"]

@@ -1,8 +1,9 @@
 # db.py
 import sqlite3
 from pathlib import Path
+import os 
 
-DB_PATH = Path("housing.db")
+DB_PATH = os.getenv("DB_PATH", "/data/housing.db")
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
