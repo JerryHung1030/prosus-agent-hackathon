@@ -37,6 +37,7 @@ def init_db():
             contract_duration_months INTEGER,
             agency_name TEXT,
             agency_email TEXT,
+            agency_contact_url TEXT,
             first_seen TEXT,
             pets_allowed INTEGER,
             scraper_version TEXT,

@@ -20,7 +20,7 @@ class Pararius(Hunter):
 
     BASE_URL = "https://www.pararius.com"
     LIST_URL = f"{BASE_URL}/apartments/nederland"
-    MAX_PAGES = 1000
+    MAX_PAGES = 1
     TIMEOUT = 30
 
     def __init__(self) -> None:
@@ -331,9 +331,19 @@ class Pararius(Hunter):
 
         email_link = soup.select_one("a[href^='mailto:']")
         email = email_link["href"].split(":", 1)[1] if email_link else None
+
+        contact_btn = soup.select_one("a.listing-reaction-button--contact-agent")
+        if contact_btn is None:
+            contact_btn = soup.select_one("a.button--orange[href*='/contact/estate-agent']")
+        contact_url = None
+        if contact_btn and contact_btn.get("href"):
+            contact_url = urljoin(self.BASE_URL, contact_btn["href"])
+        logging.info("contact_url=%s", contact_url)
         agency: Dict[str, Any] = {"name": agency_name}
         if email:
             agency["email"] = email
+        if contact_url:
+            agency["contact_url"] = contact_url
         return agency
 
     def _map_furnishes(self, value: Optional[str]) -> Optional[str]:

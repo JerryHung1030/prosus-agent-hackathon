@@ -41,6 +41,7 @@ class Contract(BaseModel):
 class Agency(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
+    contact_url: Optional[str] = None
 
 class ScrapeMeta(BaseModel):
     scraper_version: Optional[str] = None
@@ -102,10 +103,35 @@ def ingest_listings(items: List[ListingIn]):
                     area_m2, street, neighborhood, city, postal_code,
                     housing_type, furnishes, deposit,
                     contract_start_date, contract_duration_months,
-                    agency_name, agency_email,
+                    agency_name, agency_email, agency_contact_url,
                     first_seen, pets_allowed, scraper_version,
                     thumbnail_path, raw_json, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(external_id) DO UPDATE SET
+                    url = COALESCE(excluded.url, listings.url),
+                    title = COALESCE(excluded.title, listings.title),
+                    price_amount = COALESCE(excluded.price_amount, listings.price_amount),
+                    price_frequency = COALESCE(excluded.price_frequency, listings.price_frequency),
+                    service_costs = COALESCE(excluded.service_costs, listings.service_costs),
+                    area_m2 = COALESCE(excluded.area_m2, listings.area_m2),
+                    street = COALESCE(excluded.street, listings.street),
+                    neighborhood = COALESCE(excluded.neighborhood, listings.neighborhood),
+                    city = COALESCE(excluded.city, listings.city),
+                    postal_code = COALESCE(excluded.postal_code, listings.postal_code),
+                    housing_type = COALESCE(excluded.housing_type, listings.housing_type),
+                    furnishes = COALESCE(excluded.furnishes, listings.furnishes),
+                    deposit = COALESCE(excluded.deposit, listings.deposit),
+                    contract_start_date = COALESCE(excluded.contract_start_date, listings.contract_start_date),
+                    contract_duration_months = COALESCE(excluded.contract_duration_months, listings.contract_duration_months),
+                    agency_name = COALESCE(excluded.agency_name, listings.agency_name),
+                    agency_email = COALESCE(excluded.agency_email, listings.agency_email),
+                    agency_contact_url = COALESCE(excluded.agency_contact_url, listings.agency_contact_url),
+                    first_seen = COALESCE(listings.first_seen, excluded.first_seen),
+                    pets_allowed = COALESCE(excluded.pets_allowed, listings.pets_allowed),
+                    scraper_version = COALESCE(excluded.scraper_version, listings.scraper_version),
+                    thumbnail_path = COALESCE(excluded.thumbnail_path, listings.thumbnail_path),
+                    raw_json = COALESCE(excluded.raw_json, listings.raw_json),
+                    updated_at = excluded.updated_at
             """, (
                 it.id,
                 it.url,
@@ -125,6 +151,7 @@ def ingest_listings(items: List[ListingIn]):
                 contract.duration_months,
                 agency.name,
                 agency.email,
+                agency.contact_url,
                 it.first_seen,
                 1 if it.pets_allowed else 0 if it.pets_allowed is not None else None,
                 meta.scraper_version,
@@ -164,6 +191,7 @@ def list_listings(
         "housing_type", "furnishes", "deposit",
         "contract_start_date", "contract_duration_months",
         "agency_name", "agency_email",
+    "agency_contact_url",
         "first_seen", "pets_allowed",
         "scraper_version", "thumbnail_path", "created_at", "updated_at"
     ]
