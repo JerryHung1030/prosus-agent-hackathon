@@ -3,21 +3,29 @@ import json
 from typing import Any
 
 from crewai import Task
+from pydantic import BaseModel, ConfigDict, RootModel
 
 from src.tools import backend_api_tool, google_maps_tool, listing_ranker_tool
+
+# --- Output JSON schema for ranking task ---
+
+
+class RankedListingItem(BaseModel):
+    match_score: float
+    commute_time: str
+    # Allow extra keys from backend (title, url, price_amount, area_m2, etc.)
+    model_config = ConfigDict(extra="allow")
+
+
+class RankedListingsOutput(RootModel[list[RankedListingItem]]):
+    pass
+
 
 # --- SEARCH CREW TASKS ---
 
 
 def create_housing_search_task(agent, criteria: dict[str, Any]):
-    """Task: Fetch raw listings from backend.
-
-    Agent MUST:
-    1. Call backend_api_tool exactly once.
-    2. Pass filters if present: city, max_price (price), min_size (size).
-    3. Return ONLY a valid JSON list of listing objects (no explanation, no prose).
-    4. If no listings found, return [] (still JSON list).
-    """
+    """Task: Fetch raw listings from backend."""
     query_summary = {
         "city": criteria.get("city"),
         "max_price": criteria.get("price"),
@@ -37,7 +45,6 @@ def create_housing_search_task(agent, criteria: dict[str, Any]):
 def create_housing_rank_task(agent, criteria: dict[str, Any]):
     """Task: Rank listings with commute times."""
     commute_target = criteria.get("commute_target")
-    # Hard-code criteria as JSON string in the prompt to prevent misuse
     criteria_json = json.dumps(criteria)
 
     return Task(
@@ -49,13 +56,20 @@ def create_housing_rank_task(agent, criteria: dict[str, Any]):
             "Then call listing_ranker_tool ONCE. You MUST use the following dictionary as the "
             f"'criteria' argument: {criteria_json}. You must also pass the 'listings' list and the "
             "'commute_times' list.\n\n"
-            "OUTPUT RULE: Return ONLY a JSON list (Top 5 or fewer) including match_score and "
-            "commute_time."
+            "!!Most Important!! OUTPUT RULE: "
+            "Return the FULL, UNMODIFIED JSON list of ranked listings (Top 5) "
+            "exactly as you received it from the listing_ranker_tool. "
+            "Do NOT remove any fields (like id, url, title). Your final answer MUST be "
+            "the complete JSON list from that tool."
         ),
-        expected_output="A pure JSON list of ranked listings with match_score and commute_time.",
+        expected_output=(
+            "The full JSON list of the Top 5 ranked listings, "
+            "including all original fields (id, url, title, etc.) "
+            "plus the new 'match_score' and 'commute_time' fields."
+        ),
         agent=agent,
         tools=[google_maps_tool, listing_ranker_tool],
-        # output_json not supported as boolean in CrewAI 1.3.0; rely on clear description instead.
+        output_json=RankedListingsOutput,
     )
 
 

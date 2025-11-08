@@ -29,48 +29,53 @@ class ListingRankerTool(BaseTool):
     ) -> float:
         weights = {"price": 0.4, "size": 0.3, "commute": 0.3}
 
-        # 1. Price Score
-        price_score = 100.0
+        # --- 1. Price Score (New Logic) ---
+        # 100 = 遠低於預算, 0 = 預算的 1.5 倍
+        price_score = 0.0
         try:
-            # Accept multiple price keys from different sources
-            list_price = float(
-                listing.get("price") or listing.get("price_amount") or listing.get("rent") or 0
-            )
+            list_price = float(listing.get("price") or listing.get("price_amount") or 0)
             user_price = float(criteria.get("price", 0))
-            if list_price > user_price > 0:
-                price_score = (user_price / list_price) * 100
+            if user_price > 0:
+                # 價格越低越好。如果價格是 0，得 100 分。
+                # 如果價格等於 user_price * 1.5，得 0 分。
+                ratio = list_price / (user_price * 1.5)
+                price_score = max(0, 100 * (1 - ratio))
+            else:
+                price_score = 100.0  # 如果沒有預算限制，則價格不重要
         except Exception:
-            price_score = 50.0  # Penalize bad data
+            price_score = 30.0  # 懲罰壞數據
 
-        # 2. Size Score
-        size_score = 100.0
+        # --- 2. Size Score (New Logic) ---
+        # 100 = 遠大於需求, 0 = 0 m²
+        size_score = 0.0
         try:
-            # Accept multiple size keys
             list_size = float(listing.get("size_m2") or listing.get("area_m2") or 0)
             user_size = float(criteria.get("size", 0))
-            if list_size < user_size and user_size > 0:
-                size_score = (list_size / user_size) * 100
+            if user_size > 0:
+                # 面積越大越好。如果面積是 user_size * 1.5 (或更大)，得 100 分。
+                # 如果面積是 0，得 0 分。
+                ratio = list_size / (user_size * 1.5)
+                size_score = min(100, 100 * ratio)
+            else:
+                size_score = 100.0  # 如果沒有面積需求，則不重要
         except Exception:
-            size_score = 50.0  # Penalize bad data
+            size_score = 30.0  # 懲罰壞數據
 
-        # 3. Commute Score
+        # --- 3. Commute Score (New Logic) ---
+        # 100 = 0 分鐘, 0 = 60 分鐘 (或更久)
         commute_score = 0.0
         try:
-            # Extract first integer anywhere in the string (e.g., "[TRANSIT] 25 mins")
             match = re.search(r"(\d+)", commute_str or "")
             time_val = int(match.group(1)) if match else 999
-            if time_val <= 20:
-                commute_score = 100.0
-            elif time_val <= 30:
-                commute_score = 90.0
-            elif time_val <= 45:
-                commute_score = 75.0
-            else:
-                commute_score = 50.0
-        except Exception:
-            commute_score = 50.0  # Penalize if search failed
 
-        # Final weighted score
+            # 線性計分：每多 1 分鐘，分數就越低。
+            # 超過 60 分鐘都是 0 分。
+            ratio = time_val / 60.0
+            commute_score = max(0, 100 * (1 - ratio))
+        except Exception:
+            commute_score = 0.0  # 懲罰壞數據
+
+        # --- Final weighted score ---
         final_score = (
             (price_score * weights["price"])
             + (size_score * weights["size"])
