@@ -12,6 +12,8 @@ db/
 # data/
 *.csv
 *.json
+!frontend/package-lock.json
+!frontend/package.json
 
 # OS
 .DS_Store
