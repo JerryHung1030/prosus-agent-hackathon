@@ -1392,11 +1392,24 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
             # Retrieve updated session state
             updated_session = memory.get_session(session_id)
             all_criteria_ready = memory.is_ready_to_search(session_id)
+            
+            # ⚠️ CRITICAL FAILSAFE: Check if agent explicitly set ready_to_search flag
+            # This prevents auto-triggering when user hasn't given explicit consent
+            agent_ready_to_search = parsed_result.get("ready_to_search", False)
+            
+            # Additional check: detect explicit confirmation words in user message
+            user_message_lower = message.lower().strip() if message else ""
+            explicit_confirmation = any(
+                word in user_message_lower 
+                for word in ["yes", "proceed", "go ahead", "start search"]
+            )
 
             # [MODIFIED] Handle automatically triggering search (Flow Steps 4-6)
+            # NOW WITH CONSENT CHECK: Only trigger if agent says ready_to_search=true OR user explicitly confirmed
             if (
                 updated_session
                 and all_criteria_ready
+                and (agent_ready_to_search or explicit_confirmation)
                 and updated_session["status"]
                 not in [
                     "searching",
@@ -1406,7 +1419,13 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 ]
             ):
                 logging.info(
-                    "All criteria collected! Queueing background search job..."
+                    f"✅ Search trigger conditions met: "
+                    f"criteria_ready={all_criteria_ready}, "
+                    f"agent_ready={agent_ready_to_search}, "
+                    f"user_confirmed={explicit_confirmation}"
+                )
+                logging.info(
+                    "All criteria collected and user consented! Queueing background search job..."
                 )
 
                 search_criteria = updated_session["criteria"]
@@ -1438,6 +1457,13 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
                 )
+            else:
+                # Log why search was NOT triggered (for debugging)
+                if all_criteria_ready and not (agent_ready_to_search or explicit_confirmation):
+                    logging.info(
+                        f"⏸️ Search NOT triggered despite complete criteria - waiting for user consent. "
+                        f"agent_ready={agent_ready_to_search}, user_confirmed={explicit_confirmation}"
+                    )
 
             # Standard conversational reply (still collecting criteria)
             memory.add_message(
