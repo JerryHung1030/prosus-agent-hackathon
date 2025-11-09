@@ -12,7 +12,7 @@ interface MapViewProps {
 
 const GOOGLE_MAPS_API_KEY = "AIzaSyBWFfsY7vVUGNEtNLd9xT7gZfuOs3EBIPM";
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
-const DEFAULT_CENTER = { lat: 52.3676, lng: 4.9041 }; // Amsterdam fallback
+const DEFAULT_CENTER = { lat: 52.3676, lng: 4.9041 };
 const COUNTRY_CONTEXT = "Netherlands";
 
 type Coordinates = { lat: number; lng: number };
@@ -35,6 +35,7 @@ interface ListingRecord extends Record<string, unknown> {
   city?: string;
   postal_code?: string;
   housing_type?: string;
+  furnished?: string;
   furnishes?: string;
   agency_name?: string;
   agency_contact_url?: string;
@@ -59,6 +60,7 @@ interface ParsedFilters {
   minPrice?: number;
   maxPrice?: number;
   petsAllowed?: boolean;
+  minArea?: number;
 }
 
 const parseBudget = (budget?: string): { min?: number; max?: number } => {
@@ -66,9 +68,8 @@ const parseBudget = (budget?: string): { min?: number; max?: number } => {
   const numbers = (budget.match(/\d[\d.,]*/g) ?? [])
     .map((token) => Number(token.replace(/[.,]/g, "")))
     .filter(Number.isFinite);
-  if (numbers.length === 0) {
-    return {};
-  }
+
+  if (numbers.length === 0) return {};
   if (numbers.length === 1) {
     const normalized = budget.toLowerCase();
     if (/(min|min\.|from|above|over|starting)/.test(normalized)) {
@@ -76,6 +77,7 @@ const parseBudget = (budget?: string): { min?: number; max?: number } => {
     }
     return { max: numbers[0] };
   }
+
   const [first, second] = numbers;
   return { min: Math.min(first, second), max: Math.max(first, second) };
 };
@@ -97,9 +99,7 @@ const normalizePetsAllowed = (value: ListingRecord["pets_allowed"]): boolean | n
 
 const resolveThumbnailUrl = (path?: string): string | undefined => {
   if (!path) return undefined;
-  if (/^https?:\/\//i.test(path) || path.startsWith("data:")) {
-    return path;
-  }
+  if (/^https?:\/\//i.test(path) || path.startsWith("data:")) return path;
   return `${BACKEND_BASE_URL}/${path.replace(/^\/+/, "")}`;
 };
 
@@ -114,23 +114,14 @@ const formatPrice = (price?: number, frequency?: string) => {
 };
 
 const formatDistance = (distanceKm?: number | null) => {
-  if (distanceKm === null || distanceKm === undefined || Number.isNaN(distanceKm)) {
-    return null;
-  }
-  if (distanceKm < 1) {
-    return `${Math.round(distanceKm * 1000)} m away`;
-  }
+  if (distanceKm === null || distanceKm === undefined || Number.isNaN(distanceKm)) return null;
+  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m away`;
   return `${distanceKm.toFixed(1)} km away`;
 };
 
 const extractAreaLabel = (result: GeocodeResult): string | undefined => {
   const components = result.address_components ?? [];
-  const priority = [
-    "locality",
-    "postal_town",
-    "administrative_area_level_2",
-    "administrative_area_level_1",
-  ];
+  const priority = ["locality", "postal_town", "administrative_area_level_2", "administrative_area_level_1"];
   for (const type of priority) {
     const match = components.find((component) => component.types.includes(type));
     if (match) return match.long_name;
@@ -157,12 +148,9 @@ const MapView = ({ preferences }: MapViewProps) => {
   const filters = useMemo<ParsedFilters>(() => {
     const budgetRange = parseBudget(preferences.budget);
     const petsAllowed = parsePetPreference(preferences.petFriendly);
-    return {
-      minPrice: budgetRange.min,
-      maxPrice: budgetRange.max,
-      petsAllowed,
-    };
-  }, [preferences.budget, preferences.petFriendly]);
+    const minArea = preferences.minArea ? Number(preferences.minArea) : undefined;
+    return { minPrice: budgetRange.min, maxPrice: budgetRange.max, petsAllowed, minArea };
+  }, [preferences.budget, preferences.petFriendly, preferences.minArea]);
 
   const updateRadius = useCallback((center: Coordinates, zoom: number) => {
     const containerWidth = mapContainerRef.current?.offsetWidth ?? window.innerWidth ?? 1024;
@@ -185,17 +173,17 @@ const MapView = ({ preferences }: MapViewProps) => {
 
     const controller = new AbortController();
     const target = tokens[0];
-
     const geocode = async () => {
       try {
         const response = await fetch(
-          `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(`${target}, ${COUNTRY_CONTEXT}`)}&key=${GOOGLE_MAPS_API_KEY}`,
+          `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
+            `${target}, ${COUNTRY_CONTEXT}`,
+          )}&key=${GOOGLE_MAPS_API_KEY}`,
           { signal: controller.signal },
         );
         const payload = await response.json();
         const result = (payload.results?.[0] ?? null) as GeocodeResult | null;
         if (!result) return;
-
         setMapCenter(result.geometry.location);
         const nextZoom = tokens.length > 1 ? 10 : 13;
         setMapZoom(nextZoom);
@@ -205,9 +193,7 @@ const MapView = ({ preferences }: MapViewProps) => {
         console.error("Failed to geocode preferred location", error);
       }
     };
-
     void geocode();
-
     return () => controller.abort();
   }, [preferences.location, updateRadius]);
 
@@ -223,9 +209,7 @@ const MapView = ({ preferences }: MapViewProps) => {
         const result = (payload.results?.[0] ?? null) as GeocodeResult | null;
         if (!result) return;
         const label = extractAreaLabel(result);
-        if (label) {
-          setAreaLabel(label);
-        }
+        if (label) setAreaLabel(label);
       } catch (error) {
         if (!controller.signal.aborted) {
           console.error("Failed to reverse geocode map center", error);
@@ -243,8 +227,7 @@ const MapView = ({ preferences }: MapViewProps) => {
     listingControllerRef.current?.abort();
     const controller = new AbortController();
     listingControllerRef.current = controller;
-
-    const { minPrice, maxPrice, petsAllowed } = filters;
+    const { minPrice, maxPrice, petsAllowed, minArea } = filters;
 
     const timeoutId = window.setTimeout(async () => {
       setIsPinsLoading(true);
@@ -255,31 +238,23 @@ const MapView = ({ preferences }: MapViewProps) => {
         url.searchParams.set("lng", mapCenter.lng.toFixed(6));
         url.searchParams.set("radius", radiusKm.toFixed(2));
         url.searchParams.set("all", "true");
-        if (minPrice !== undefined) {
-          url.searchParams.set("min_price", String(Math.round(minPrice)));
-        }
-        if (maxPrice !== undefined) {
-          url.searchParams.set("max_price", String(Math.round(maxPrice)));
-        }
-        if (petsAllowed !== undefined) {
-          url.searchParams.set("pets_allowed", petsAllowed ? "true" : "false");
-        }
+        if (minPrice !== undefined) url.searchParams.set("min_price", String(Math.round(minPrice)));
+        if (maxPrice !== undefined) url.searchParams.set("max_price", String(Math.round(maxPrice)));
+        if (petsAllowed !== undefined) url.searchParams.set("pets_allowed", petsAllowed ? "true" : "false");
+        if (minArea !== undefined) url.searchParams.set("min_area", String(Math.round(minArea)));
 
         const response = await fetch(url.toString(), { signal: controller.signal });
-        if (!response.ok) {
-          throw new Error(`Failed to fetch listings (${response.status})`);
-        }
-
+        if (!response.ok) throw new Error(`Failed to fetch listings (${response.status})`);
         const payload = (await response.json()) as { items?: ListingRecord[] };
         const items = Array.isArray(payload.items) ? payload.items : [];
 
         const nextPins = items
           .map((item) => {
-            const location = item.location
-              ? item.location
-              : typeof item.latitude === "number" && typeof item.longitude === "number"
-              ? { lat: item.latitude, lng: item.longitude }
-              : null;
+            const location =
+              item.location ??
+              (typeof item.latitude === "number" && typeof item.longitude === "number"
+                ? { lat: item.latitude, lng: item.longitude }
+                : null);
             const lookupId =
               item.id !== undefined && item.id !== null
                 ? String(item.id)
@@ -299,19 +274,13 @@ const MapView = ({ preferences }: MapViewProps) => {
               lat: location.lat,
               lng: location.lng,
               distanceKm: distance,
-              summary: {
-                ...normalizedListing,
-                distance_km: distance,
-              },
+              summary: { ...normalizedListing, distance_km: distance },
             } as ListingPin;
           })
           .filter((value): value is ListingPin => value !== null);
 
         setPins(nextPins);
-        setSelectedPin((prev) => {
-          if (!prev) return null;
-          return nextPins.find((pin) => pin.lookupId === prev.lookupId) ?? null;
-        });
+        setSelectedPin((prev) => (prev ? nextPins.find((pin) => pin.lookupId === prev.lookupId) ?? null : null));
       } catch (error) {
         if (controller.signal.aborted) return;
         console.error("Error loading listings", error);
@@ -320,9 +289,7 @@ const MapView = ({ preferences }: MapViewProps) => {
         setSelectedListingDetails(null);
         setErrorMessage("Unable to load listings for this area.");
       } finally {
-        if (!controller.signal.aborted) {
-          setIsPinsLoading(false);
-        }
+        if (!controller.signal.aborted) setIsPinsLoading(false);
       }
     }, 250);
 
@@ -338,9 +305,7 @@ const MapView = ({ preferences }: MapViewProps) => {
     setIsListingDetailLoading(true);
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/listing/${encodeURIComponent(pin.lookupId)}`);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch listing detail (${response.status})`);
-      }
+      if (!response.ok) throw new Error(`Failed to fetch listing detail (${response.status})`);
       const detail = (await response.json()) as ListingRecord;
       setSelectedListingDetails({
         ...detail,
@@ -372,6 +337,16 @@ const MapView = ({ preferences }: MapViewProps) => {
             <Badge variant="secondary" className="glass glass-dark">
               Radius {radiusKm.toFixed(1)} km
             </Badge>
+            {filters.maxPrice !== undefined && (
+              <Badge variant="outline" className="glass glass-dark">
+                ≤ €{filters.maxPrice.toLocaleString()}
+              </Badge>
+            )}
+            {filters.minArea !== undefined && (
+              <Badge variant="outline" className="glass glass-dark">
+                ≥ {filters.minArea}m²
+              </Badge>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -464,12 +439,10 @@ const MapView = ({ preferences }: MapViewProps) => {
             <div className="mt-3 space-y-2 text-sm">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-primary">
-                  {
-                    formatPrice(
-                      detailToRender.price_amount as number | undefined,
-                      detailToRender.price_frequency as string | undefined,
-                    ) ?? "Price on request"
-                  }
+                  {formatPrice(
+                    detailToRender.price_amount as number | undefined,
+                    detailToRender.price_frequency as string | undefined,
+                  ) ?? "Price on request"}
                 </span>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   {detailToRender.area_m2 && <span>{detailToRender.area_m2} m²</span>}
@@ -484,9 +457,7 @@ const MapView = ({ preferences }: MapViewProps) => {
               <div className="text-xs text-muted-foreground space-y-1">
                 {detailToRender.street && <div>{detailToRender.street}</div>}
                 {(detailToRender.postal_code || detailToRender.city) && (
-                  <div>
-                    {[detailToRender.postal_code, detailToRender.city].filter(Boolean).join(" " )}
-                  </div>
+                  <div>{[detailToRender.postal_code, detailToRender.city].filter(Boolean).join(" ")}</div>
                 )}
                 {detailToRender.pets_allowed !== null && detailToRender.pets_allowed !== undefined && (
                   <div>Pets {detailToRender.pets_allowed ? "allowed" : "not allowed"}</div>

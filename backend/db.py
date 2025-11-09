@@ -112,5 +112,18 @@ def init_db():
         """
         )
 
+        # [NEW] Migrate listings table to add application status columns if they don't exist
+        cur.execute("PRAGMA table_info(listings)")
+        existing_listings_cols = {row[1] for row in cur.fetchall()}
+        listings_migrations: list[tuple[str, str, str]] = [
+            ("application_status", "TEXT", "DEFAULT 'none'"),
+            ("application_screenshot_path", "TEXT", ""),
+        ]
+        for col_name, col_type, col_extra in listings_migrations:
+            if col_name not in existing_listings_cols:
+                alter_sql = f"ALTER TABLE listings ADD COLUMN {col_name} {col_type} {col_extra}".strip()
+                cur.execute(alter_sql)
+                print(f"Added column {col_name} to listings table")
+
         conn.commit()
     print("Database initialized.")

@@ -8,10 +8,13 @@ import { Link } from "react-router-dom";
 export interface Preferences {
   location?: string;
   budget?: string;
+  minArea?: string; // Minimum area in m² (e.g., "50")
   bedrooms?: string;
   moveInDate?: string;
   furnished?: string;
   petFriendly?: string;
+  session_id?: string;
+  last_search_results?: any[];
 }
 
 const SearchAssistant = () => {

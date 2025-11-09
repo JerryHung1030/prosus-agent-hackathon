@@ -5,6 +5,9 @@ import { Card } from "@/components/ui/card";
 import { Send, Loader2, Bot, User } from "lucide-react";
 import { Preferences } from "@/pages/SearchAssistant";
 import PreferenceChips from "./PreferenceChips";
+import { fetchListingsForPreferences, pollJobOnce } from "@/lib/listingsApi";
+
+const BACKEND = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 interface Message {
   role: "user" | "assistant";
@@ -109,6 +112,44 @@ const formatList = (items: string[]) => {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 };
 
+// Map backend criteria format to frontend preferences format
+const mapBackendCriteriaToPreferences = (backendCriteria: any): Preferences => {
+  const mapped: Preferences = {};
+  
+  // Map city -> location
+  if (backendCriteria.city) {
+    mapped.location = backendCriteria.city;
+  }
+  
+  // Map max_price -> budget
+  if (backendCriteria.max_price !== undefined && backendCriteria.max_price !== null) {
+    const price = Number(backendCriteria.max_price);
+    if (!isNaN(price)) {
+      mapped.budget = `€${price.toLocaleString()}`;
+    }
+  }
+  
+  // Map min_size -> minArea
+  if (backendCriteria.min_size !== undefined && backendCriteria.min_size !== null) {
+    const size = Number(backendCriteria.min_size);
+    if (!isNaN(size)) {
+      mapped.minArea = String(size);
+    }
+  }
+  
+  // Keep any other fields that match (bedrooms, furnished, petFriendly, etc.)
+  if (backendCriteria.bedrooms) mapped.bedrooms = String(backendCriteria.bedrooms);
+  if (backendCriteria.furnished) mapped.furnished = backendCriteria.furnished;
+  if (backendCriteria.petFriendly || backendCriteria.pet_friendly) {
+    mapped.petFriendly = backendCriteria.petFriendly || backendCriteria.pet_friendly;
+  }
+  if (backendCriteria.moveInDate || backendCriteria.move_in_date) {
+    mapped.moveInDate = backendCriteria.moveInDate || backendCriteria.move_in_date;
+  }
+  
+  return mapped;
+};
+
 const generateAssistantResponse = (allPreferences: Preferences, newlyCaptured: Preferences) => {
   const acknowledgements: string[] = [];
   if (newlyCaptured.location) {
@@ -164,6 +205,17 @@ const ChatInterface = ({ onPreferencesUpdate, preferences }: ChatInterfaceProps)
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  
+  // Maintain session_id with localStorage persistence
+  const [sessionId, setSessionId] = useState<string | null>(() => {
+    try {
+      return (preferences as any)?.session_id || window.localStorage.getItem("chat_session_id");
+    } catch (e) {
+      console.warn("localStorage not available", e);
+      return (preferences as any)?.session_id || null;
+    }
+  });
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -178,50 +230,114 @@ const ChatInterface = ({ onPreferencesUpdate, preferences }: ChatInterfaceProps)
     if (!input.trim() || isLoading) return;
 
     const userMessage: Message = { role: "user", content: input };
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
-
+    setMessages((m) => [...m, userMessage]);
     setInput("");
     setIsLoading(true);
 
+    // Quick local parse to keep UI responsive
     try {
       const extractedPrefs = parsePreferencesFromMessage(userMessage.content);
-      const newlyCaptured: Preferences = {};
-
-      (Object.entries(extractedPrefs) as Array<[keyof Preferences, string | undefined]>).forEach(
-        ([key, value]) => {
-          if (value && preferences[key] !== value) {
-            newlyCaptured[key] = value;
-          }
-        }
-      );
-
       if (Object.keys(extractedPrefs).length > 0) {
         onPreferencesUpdate({ ...preferences, ...extractedPrefs });
       }
-
-      await new Promise((resolve) => setTimeout(resolve, 400));
-
-      const assistantReply = generateAssistantResponse(
-        { ...preferences, ...extractedPrefs },
-        newlyCaptured
-      );
-
-      setMessages([
-        ...updatedMessages,
-        { role: "assistant", content: assistantReply },
-      ]);
-    } catch (error) {
-      console.error("Error generating assistant response:", error);
-      setMessages([
-        ...updatedMessages,
-        {
-          role: "assistant",
-          content: "I had trouble understanding that. Could you share your preferences again in a different way?",
-        },
-      ]);
+    } catch (e) {
+      console.warn("local parse failed", e);
     }
-    setIsLoading(false);
+
+    try {
+      // Always send session_id if we have one (use local state first, then preferences fallback)
+      const body = {
+        session_id: sessionId || (preferences as any).session_id || undefined,
+        message: userMessage.content,
+      };
+      
+      console.log("🔵 Sending message to /agent/housing/chat", { session_id: body.session_id, message_preview: userMessage.content.slice(0, 50) });
+
+      const res = await fetch(`${BACKEND}/agent/housing/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      
+      console.log("🟢 Response from /agent/housing/chat", { status: res.status, session_id: data.session_id, has_response: !!data.response });
+
+      // Persist session_id if backend returns one
+      if (data.session_id && data.session_id !== sessionId) {
+        console.log("💾 Persisting new session_id:", data.session_id);
+        setSessionId(data.session_id);
+        try { 
+          window.localStorage.setItem("chat_session_id", data.session_id); 
+        } catch (e) {
+          console.warn("Failed to save session_id to localStorage", e);
+        }
+        onPreferencesUpdate({ ...preferences, session_id: data.session_id });
+      }
+
+      // Agent unavailable -> fallback to listing endpoint, but keep conversation visible
+      if (res.status === 503 || data.status === "agent_unavailable" || !res.ok) {
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content:
+              "Agent features are currently unavailable. I'll show local results; use the map filters or click 'Search' to load listings.",
+          },
+        ]);
+        // fallback: call /listings with current preferences
+        const lres = await fetchListingsForPreferences(preferences);
+        onPreferencesUpdate({ ...preferences, last_search_results: lres.items ?? [] });
+        setIsLoading(false);
+        return;
+      }
+
+      // If agent started a background search, backend returns 202 with job_id
+      if (res.status === 202 && data.job_id) {
+        if (data.session_id) onPreferencesUpdate({ ...preferences, session_id: data.session_id });
+
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", content: data.response || "Search started — I'll let you know when it's done." },
+        ]);
+
+        // poll job to completion and load listings on finish
+        const jobRes = await pollJobOnce(data.job_id);
+        const listings = jobRes.result?.listings ?? [];
+        onPreferencesUpdate({ ...preferences, last_search_results: listings, session_id: data.session_id });
+        setMessages((m) => [...m, { role: "assistant", content: `Search finished — showing ${listings.length} results on the map.` }]);
+        setIsLoading(false);
+        return;
+      }
+
+      // Normal conversational reply with optional extracted_criteria
+      if (data.response) {
+        if (data.session_id) onPreferencesUpdate({ ...preferences, session_id: data.session_id });
+        // If agent included criteria (defensive: accept extracted_criteria, expected_criteria, or criteria)
+        const agentCriteria = data.extracted_criteria || data.expected_criteria || data.criteria || {};
+        console.log('🔵 Agent criteria received (backend format):', agentCriteria);
+        if (agentCriteria && Object.keys(agentCriteria).length > 0) {
+          const mappedCriteria = mapBackendCriteriaToPreferences(agentCriteria);
+          console.log('🟢 Mapped criteria (frontend format):', mappedCriteria);
+          console.log('🗺️ Updating preferences to trigger map update');
+          onPreferencesUpdate({ ...preferences, ...mappedCriteria });
+        }
+
+        setMessages((m) => [...m, { role: "assistant", content: data.response }]);
+
+        // if agent returned listings inline (synchronous), use them too
+        if (data.listings && Array.isArray(data.listings)) {
+          onPreferencesUpdate({ ...preferences, last_search_results: data.listings });
+        }
+      } else {
+        setMessages((m) => [...m, { role: "assistant", content: "No reply from agent." }]);
+      }
+    } catch (error) {
+      console.error("sendMessage error", error);
+      setMessages((m) => [...m, { role: "assistant", content: "Server error. Try again or use the map filters." }]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleKeyPress = (e: KeyboardEvent<HTMLInputElement>) => {

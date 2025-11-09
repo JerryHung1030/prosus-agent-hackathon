@@ -45,9 +45,10 @@ except Exception as mem_exc:
         "ConversationMemory import failed (%s); using in-process fallback.", mem_exc
     )
     class ConversationMemory:  # type: ignore
-        """Minimal in-memory fallback compatible with API usage."""
+        """Minimal in-process fallback memory with the methods expected by the API."""
         def __init__(self):
-            self.sessions = {}
+            self.sessions: Dict[str, Dict[str, Any]] = {}
+
         def create_session(self):
             sid = hashlib.md5(str(datetime.now(timezone.utc)).encode()).hexdigest()
             self.sessions[sid] = {
@@ -56,10 +57,14 @@ except Exception as mem_exc:
                 "criteria": {"city": None, "max_price": None, "min_size": None, "commute_target": None},
                 "status": "collecting",
                 "search_results": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             return sid
+
         def get_session(self, session_id):
             return self.sessions.get(session_id)
+
         def add_message(self, session_id, role, content, metadata=None):
             if session_id not in self.sessions:
                 return
@@ -67,26 +72,68 @@ except Exception as mem_exc:
                 "role": role,
                 "content": content,
                 "metadata": metadata or {},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             })
+            self.sessions[session_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+
         def update_status(self, session_id, status):
             if session_id in self.sessions:
                 self.sessions[session_id]["status"] = status
+                self.sessions[session_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+
         def format_conversation_history(self, session_id, limit=None):
             sess = self.sessions.get(session_id)
             if not sess:
                 return ""
             msgs = sess["messages"][-limit:] if limit else sess["messages"]
             return "\n".join(f"{m['role'].upper()}: {m['content']}" for m in msgs)
+
         def get_criteria(self, session_id):
             sess = self.sessions.get(session_id)
             return sess.get("criteria", {}) if sess else {}
+
+        # --- New methods used by the API code ---
+        def update_criteria(self, session_id, updates: Dict[str, Any]):
+            sess = self.sessions.get(session_id)
+            if not sess:
+                return
+            if "criteria" not in sess or not isinstance(sess["criteria"], dict):
+                sess["criteria"] = {}
+            sess["criteria"].update(updates)
+            sess["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        def save_search_results(self, session_id, listings: List[Dict[str, Any]]):
+            sess = self.sessions.get(session_id)
+            if not sess:
+                return
+            sess["search_results"] = listings
+            sess["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        def is_ready_to_search(self, session_id) -> bool:
+            sess = self.sessions.get(session_id)
+            if not sess:
+                return False
+            crit = sess.get("criteria", {}) or {}
+            # Consider "ready" if city OR commute_target and at least one numeric constraint is present
+            if crit.get("city"):
+                return True
+            if crit.get("commute_target") and (crit.get("max_price") or crit.get("min_size")):
+                return True
+            return False
+
+        def list_sessions(self, limit: int = 10):
+            # Return most recent sessions
+            sessions = sorted(self.sessions.values(), key=lambda s: s.get("updated_at", ""), reverse=True)
+            return sessions[:limit]
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AGENT_AVAILABLE = False
 if OPENAI_API_KEY:
     try:
+        logging.info("OPENAI_API_KEY found; enabling agent features")
         from src.main import run_main_crew  # type: ignore
         AGENT_AVAILABLE = True
+        logging.info("Agent features enabled")
     except Exception as import_exc:
         logging.warning("Agent import failed (%s); disabling agent features", import_exc)
         def run_main_crew(*args, **kwargs):  # type: ignore
@@ -111,6 +158,78 @@ init_db()  # Ensure tables exist on startup
 
 # Load API keys from environment
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+
+# ---------- Helper: normalize criteria keys ----------
+def _normalize_criteria_input(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Accepts whatever the agent / memory returned and normalizes into canonical keys:
+    city, max_price, min_size, commute_target and any other pass-through keys.
+    Handles:
+      - 'expected_criteria', 'expectedCriteria'
+      - 'extracted_criteria'
+      - 'criteria'
+      - nested forms
+      - synonym keys like 'budget' -> max_price
+    """
+    if not raw:
+        return {}
+
+    # If it's a wrapper dict like {"expected_criteria": {...}} find inner dict
+    if isinstance(raw, dict) and any(k in raw for k in ("expected_criteria", "expectedCriteria", "extracted_criteria", "criteria", "results")):
+        for candidate in ("criteria", "expected_criteria", "expectedCriteria", "extracted_criteria", "results"):
+            if candidate in raw and isinstance(raw[candidate], dict):
+                raw = raw[candidate]
+                break
+
+    if not isinstance(raw, dict):
+        return {}
+
+    # canonical mapping
+    out: Dict[str, Any] = {}
+    # low-level canonical keys we care about
+    key_map = {
+        # synonyms -> canonical
+        "city": "city",
+        "location": "city",
+        "area": "city",
+        "max_price": "max_price",
+        "price_max": "max_price",
+        "budget": "max_price",
+        "min_size": "min_size",
+        "size_min": "min_size",
+        "min_area": "min_size",
+        "commute_target": "commute_target",
+        "commute": "commute_target",
+        "destination": "commute_target",
+    }
+
+    # first pass: map known keys
+    for k, v in raw.items():
+        lk = k.lower()
+        if lk in key_map:
+            out[key_map[lk]] = v
+        else:
+            # if already canonical-looking, pass-through
+            if lk in ("city", "max_price", "min_size", "commute_target"):
+                out[lk] = v
+            else:
+                # keep other things available too (bedrooms, furnished, petFriendly etc.)
+                out[k] = v
+
+    # normalize numeric strings -> ints for known numeric fields if possible
+    if "max_price" in out and isinstance(out["max_price"], str):
+        try:
+            out["max_price"] = int("".join(ch for ch in out["max_price"] if ch.isdigit()))
+        except Exception:
+            pass
+    if "min_size" in out and isinstance(out["min_size"], str):
+        try:
+            out["min_size"] = int("".join(ch for ch in out["min_size"] if ch.isdigit()))
+        except Exception:
+            pass
+
+    return out
 
 
 # ---------- Pydantic models ----------
@@ -742,14 +861,24 @@ def _complete_job(
 
 
 def _parse_agent_result(result: Any) -> Dict[str, Any]:
-    """Best-effort parse of Agent result into a dict with optional 'listings'."""
-    # Try common attributes
+    """Best-effort parse of Agent result into a dict with optional 'listings' and normalized 'criteria'."""
+    # --- existing extraction logic ---
     raw_text = None
     if hasattr(result, "json_dict") and getattr(result, "json_dict"):
         try:
-            return dict(getattr(result, "json_dict"))
+            parsed = dict(getattr(result, "json_dict"))
         except Exception:
-            pass
+            parsed = None
+        if parsed:
+            # Normalize criteria keys if present
+            if isinstance(parsed, dict):
+                # if parsed contains expected_criteria/extracted_criteria/criteria, normalize into parsed['criteria']
+                for candidate in ("expected_criteria", "expectedCriteria", "extracted_criteria", "criteria"):
+                    if candidate in parsed and isinstance(parsed[candidate], dict):
+                        parsed["criteria"] = _normalize_criteria_input(parsed[candidate])
+                        break
+            return parsed
+
     if hasattr(result, "raw"):
         try:
             raw_text = str(getattr(result, "raw"))
@@ -758,7 +887,6 @@ def _parse_agent_result(result: Any) -> Dict[str, Any]:
     else:
         raw_text = str(result)
 
-    # Try to extract JSON object/array from text
     try:
         import re
 
@@ -768,19 +896,32 @@ def _parse_agent_result(result: Any) -> Dict[str, Any]:
         else:
             parsed = json.loads(raw_text)
     except Exception:
-        # Fallback to returning raw text
         return {"raw": raw_text}
 
-    # Normalize to dict with 'listings' when possible
+    # Normalize listings / results / criteria
+    out: Dict[str, Any] = {}
     if isinstance(parsed, dict):
+        # Normalize results/listings
         if "listings" in parsed:
-            return parsed
-        if "results" in parsed:
-            return {**parsed, "listings": parsed.get("results", [])}
-        return parsed
-    if isinstance(parsed, list):
-        return {"listings": parsed}
-    return {"raw": raw_text}
+            out.update(parsed)
+        elif "results" in parsed:
+            out.update(parsed)
+            out["listings"] = parsed.get("results", [])
+        else:
+            out.update(parsed)
+
+        # Normalize criteria-like keys into canonical 'criteria'
+        for candidate in ("expected_criteria", "expectedCriteria", "extracted_criteria", "criteria"):
+            if candidate in parsed:
+                out["criteria"] = _normalize_criteria_input(parsed[candidate])
+                break
+
+    elif isinstance(parsed, list):
+        out["listings"] = parsed
+    else:
+        out["raw"] = raw_text
+
+    return out
 
 
 def _run_search_task(job_id: int, session_id: Optional[str], criteria: Dict[str, Any]):
@@ -940,31 +1081,11 @@ def agent_housing_search(request: HousingSearchRequest):
         logging.info(f"Starting housing search with criteria: {criteria}")
         result = run_main_crew("housing_search", crew_inputs, streamlit_callback=None)
 
-        # Parse crew result
+        # Parse crew result using unified parser
         try:
-            result_str = None
-            parsed_result = None
-            if hasattr(result, "json_dict"):
-                try:
-                    if result.json_dict:
-                        parsed_result = result.json_dict
-                        result_str = json.dumps(parsed_result)
-                except Exception:
-                    pass
-            if not parsed_result and hasattr(result, "raw"):
-                try:
-                    result_str = result.raw
-                except Exception:
-                    pass
-            if not parsed_result and not result_str:
-                result_str = str(result)
-            if isinstance(result_str, str) and not parsed_result:
-                import re
-
-                json_match = re.search(r"(\[.*\]|\{.*\})", result_str, re.DOTALL)
-                if json_match:
-                    result_str = json_match.group(1)
-                parsed_result = json.loads(result_str)
+            parsed_result = _parse_agent_result(result)
+            
+            # Determine listings
             if isinstance(parsed_result, dict):
                 if "results" in parsed_result:
                     listings = parsed_result["results"]
@@ -976,9 +1097,22 @@ def agent_housing_search(request: HousingSearchRequest):
                 listings = parsed_result
             else:
                 listings = []
+
+            # Normalize any criteria the agent returned
+            agent_criteria = {}
+            if isinstance(parsed_result, dict) and any(k in parsed_result for k in ("criteria", "expected_criteria", "expectedCriteria", "extracted_criteria")):
+                # prefer parsed_result['criteria'] if present
+                agent_criteria = _normalize_criteria_input(
+                    parsed_result.get("criteria") or 
+                    parsed_result.get("expected_criteria") or 
+                    parsed_result.get("expectedCriteria") or 
+                    parsed_result.get("extracted_criteria")
+                )
+
+            # The API should always return a 'criteria' key with canonical structure.
             return {
                 "success": True,
-                "criteria": criteria,
+                "criteria": agent_criteria or criteria,   # return agent-updated criteria if present, else the request criteria
                 "count": len(listings),
                 "listings": listings,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1089,19 +1223,27 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # If no session_id provided, create a new session
         if not session_id:
             session_id = memory.create_session()
-            logging.info(f"Created new conversation session: {session_id}")
+            logging.info(f"✨ Created new conversation session: {session_id}")
+        else:
+            logging.info(f"📖 Continuing existing conversation session: {session_id}")
 
         # Retrieve existing session
         session = memory.get_session(session_id)
         if not session:
+            logging.error(f"❌ Session {session_id} not found in memory")
             return {
                 "success": False,
                 "error": f"Session {session_id} not found",
+                "session_id": session_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-        # Persist user's message
-        memory.add_message(session_id, "user", message)
+        # Persist user's message (log errors if memory fails)
+        try:
+            memory.add_message(session_id, "user", message)
+            logging.debug(f"💬 Added user message to session {session_id}: {message[:100]}")
+        except Exception as mem_exc:
+            logging.exception(f"❌ Failed to add user message to memory for session {session_id}: {mem_exc}")
 
         # --- [NEW] Handle post-search flow (Flow Step 7) ---
         if session["status"] == "AWAITING_APPLY_DECISION":
@@ -1151,8 +1293,9 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
         }
 
         # Execute the conversation agent
-        logging.info(f"Processing conversation for session {session_id}")
-        logging.info(f"Current criteria: {current_criteria}")
+        logging.info(f"🤖 Processing conversation for session {session_id}")
+        logging.info(f"📋 Current criteria: {current_criteria}")
+        logging.info(f"💭 Conversation history (last 10):\n{conversation_history if conversation_history else '(empty)'}")
         # Run the real agent (requires OPENAI_API_KEY)
         result = run_main_crew("conversation", crew_inputs, streamlit_callback=None)
 
@@ -1196,17 +1339,34 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 try:
                     parsed_result = json.loads(result_str_json)
                     agent_response = parsed_result.get("response", result_str)
-                    extracted_criteria = parsed_result.get("extracted_criteria", {})
+                    
+                    # Unify extracted criteria from various names using normalizer
+                    raw_extracted = (
+                        parsed_result.get("extracted_criteria") or 
+                        parsed_result.get("expected_criteria") or 
+                        parsed_result.get("expectedCriteria") or 
+                        parsed_result.get("criteria") or 
+                        {}
+                    )
+                    extracted_criteria = _normalize_criteria_input(raw_extracted or {})
                     is_complete = parsed_result.get("is_complete", False)
 
                     # Update session criteria with extracted values
-                    updates = {}
-                    for key, value in extracted_criteria.items():
-                        if value is not None:
-                            updates[key] = value
+                    updates = {k: v for k, v in extracted_criteria.items() if v is not None}
                     if updates:
-                        logging.info(f"\nDEBUG: Updating criteria with: {updates}\n")
-                        memory.update_criteria(session_id, updates)
+                        logging.info(f"🔄 Updating criteria for session {session_id}: {updates}")
+                        try:
+                            # Some ConversationMemory implementations might use update_criteria or set_criteria
+                            if hasattr(memory, "update_criteria"):
+                                memory.update_criteria(session_id, updates)
+                                logging.debug(f"✅ Session {session_id} criteria updated with {updates}")
+                            elif hasattr(memory, "set_criteria"):
+                                memory.set_criteria(session_id, updates)
+                                logging.debug(f"✅ Session {session_id} criteria set with {updates}")
+                            else:
+                                logging.warning("⚠️ ConversationMemory missing update_criteria / set_criteria methods.")
+                        except Exception as mem_exc:
+                            logging.exception(f"❌ Failed to update memory criteria for session {session_id}: {mem_exc}")
                 except json.JSONDecodeError:
                     logging.warning(
                         f"Could not parse JSON from agent response: {result_str_json}"
@@ -1336,6 +1496,7 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
         logging.error(f"Error in agent_housing_chat: {e}", exc_info=True)
         return {
             "success": False,
+            "session_id": session_id if 'session_id' in locals() else None,
             "error": str(e),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
