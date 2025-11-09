@@ -227,13 +227,20 @@ class ParariusFormTool(BaseTool):
             print("Taking full-page screenshot...")
             time.sleep(1)  # Wait 1 second for UI to settle
 
-            # Define the output path
+            # Extract listing ID from URL for organized storage
+            # Example URL: https://www.pararius.com/apartment-for-rent/delft/abc123/contact
+            listing_id = listing_url.rstrip('/').split('/')[-2] if '/' in listing_url else 'unknown'
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            screenshot_folder = "outputs"
+            
+            # Save to shared images volume (mounted at /app/images in Docker)
+            # Use /app/images for Docker, fallback to ./images for local development
+            base_images_path = "/app/images" if os.path.exists("/app/images") else "./images"
+            screenshot_folder = os.path.join(base_images_path, listing_id)
+            
             if not os.path.exists(screenshot_folder):
-                os.makedirs(screenshot_folder)
+                os.makedirs(screenshot_folder, exist_ok=True)
 
-            screenshot_name = f"{screenshot_folder}/submission_proof_{timestamp}.png"
+            screenshot_name = os.path.join(screenshot_folder, f"application_{timestamp}.png")
 
             # Use your provided full-page capture function
             save_full_page_screenshot(driver, screenshot_name)
@@ -245,9 +252,14 @@ class ParariusFormTool(BaseTool):
             # We don't need to sleep, headless closes instantly
             # time.sleep(2)
 
+            # Return relative path for database storage
+            # Convert absolute path to relative path for backend serving
+            # /app/images/listing-id/application.png -> images/listing-id/application.png
+            relative_path = screenshot_name.replace("/app/images/", "images/").replace("./images/", "images/")
+            
             return (
                 f"Successfully LOGGED IN and FILLED form for {listing_url}. "
-                f"Screenshot saved as {screenshot_name}."
+                f"Screenshot saved as {relative_path}."
             )
 
         except Exception as e:

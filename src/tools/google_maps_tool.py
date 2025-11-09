@@ -31,6 +31,18 @@ class CommuteInput(BaseModel):
     )
 
 
+class CommuteMatrixInput(BaseModel):
+    origins: list[str] = Field(
+        description="List of starting addresses (e.g., multiple listing addresses)."
+    )
+    destination: str = Field(
+        description="The destination address (e.g., the user's commute target)."
+    )
+    mode: str = Field(
+        default="transit", description="Mode of transport (transit, driving, walking, bicycling)."
+    )
+
+
 class GoogleMapsTool(BaseTool):
     name: str = "google_maps_tool"
     description: str = (
@@ -73,8 +85,10 @@ class GoogleMapsTool(BaseTool):
     def _run(self, origin: str, destination: str, mode: str = "transit") -> str:
         # Fallback early if client not initialized
         if gmaps is None:
+            print("[Directions] Google Maps client unavailable, using fallback value")
             return "999 mins"  # large number so downstream ranking penalizes commute
         try:
+            print(f"[Directions] Calculating single route: {origin[:50]}... -> {destination[:50]}...")
             # Next Monday 08:30 (always the NEXT one)
             now = datetime.now()
             days_ahead = (7 - now.weekday()) % 7 or 7
@@ -117,4 +131,99 @@ class GoogleMapsTool(BaseTool):
             return f"Error with Google Maps API: {str(e)}"
 
 
+class GoogleMapsMatrixTool(BaseTool):
+    """
+    Batch commute time calculator using Google Maps Distance Matrix API.
+    Efficiently computes commute times for multiple origins to a single destination.
+    """
+
+    name: str = "google_maps_matrix_tool"
+    description: str = (
+        "Calculates commute times for multiple listings (origins) to a single destination "
+        "using Google Maps Distance Matrix API. Returns list of duration strings. "
+        "Falls back to large placeholder values when API/key not available."
+    )
+    args_schema: type[BaseModel] = CommuteMatrixInput
+
+    def _run(
+        self, origins: list[str], destination: str, mode: str = "transit"
+    ) -> list[str]:
+        """
+        Batch calculate commute times from multiple origins to one destination.
+
+        Args:
+            origins: List of starting addresses (listing locations)
+            destination: Target destination address
+            mode: Transport mode (transit, driving, walking, bicycling)
+
+        Returns:
+            List of duration strings (e.g., ["23 mins", "15 mins", "999 mins"])
+            Returns "999 mins" for any failed origins to penalize in ranking.
+        """
+        # Handle empty input
+        if not origins:
+            return []
+
+        # Fallback early if client not initialized
+        if gmaps is None:
+            print("[Matrix] Google Maps client unavailable, using fallback values")
+            return ["999 mins"] * len(origins)
+
+        try:
+            print(f"[Matrix] Batch calculating commute times for {len(origins)} listings")
+
+            # Use "now" for departure time in matrix API (simpler than directions)
+            # Matrix API doesn't support future departure times as well
+            matrix_response = gmaps.distance_matrix(
+                origins=origins,
+                destinations=[destination],
+                mode=mode,
+                departure_time="now",
+            )
+
+            # Check API response status
+            if matrix_response.get("status") != "OK":
+                print(
+                    f"[Matrix] API returned status: {matrix_response.get('status')}, falling back"
+                )
+                return ["999 mins"] * len(origins)
+
+            # Extract durations from response
+            results = []
+            rows = matrix_response.get("rows", [])
+
+            for idx, row in enumerate(rows):
+                elements = row.get("elements", [])
+                if not elements:
+                    results.append("999 mins")
+                    continue
+
+                element = elements[0]  # First destination (we only query one)
+                status = element.get("status")
+
+                if status == "OK":
+                    duration = element.get("duration", {})
+                    duration_text = duration.get("text", "999 mins")
+                    results.append(duration_text)
+                    print(f"[Matrix] Origin {idx + 1}: {duration_text}")
+                else:
+                    # Handle ZERO_RESULTS, NOT_FOUND, etc.
+                    print(
+                        f"[Matrix] Origin {idx + 1} failed with status: {status}, using fallback"
+                    )
+                    results.append("999 mins")
+
+            # Ensure we have results for all origins
+            while len(results) < len(origins):
+                results.append("999 mins")
+
+            print(f"[Matrix] Batch calculation complete: {len(results)} results")
+            return results
+
+        except Exception as e:
+            print(f"[Matrix] Error during batch calculation: {e}, using fallback values")
+            return ["999 mins"] * len(origins)
+
+
 google_maps_tool = GoogleMapsTool()
+google_maps_matrix_tool = GoogleMapsMatrixTool()

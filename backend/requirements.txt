@@ -16,3 +16,4 @@ tavily-python>=0.7.0
 selenium
 webdriver-manager
 streamlit
+googlemaps

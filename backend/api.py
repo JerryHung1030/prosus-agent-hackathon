@@ -976,24 +976,27 @@ def _run_apply_task(job_id: int, payload: Dict[str, Any]):
         else:
             result_text = str(result)
 
-        # Try to extract screenshot path
+        # Try to extract screenshot path from tool result
         screenshot_path = None
         if isinstance(result_text, str) and "Screenshot saved as " in result_text:
             try:
                 path_part = (
                     result_text.split("Screenshot saved as ")[-1].strip().rstrip(".")
                 )
-                if os.path.exists(path_part) and path_part.endswith(".png"):
+                # Accept paths like "images/listing-id/application_timestamp.png"
+                if path_part and path_part.endswith(".png"):
                     screenshot_path = path_part
-            except Exception:
-                pass
+                    logging.info(f"[BG] Extracted screenshot path: {screenshot_path}")
+            except Exception as extract_exc:
+                logging.warning(f"[BG] Failed to extract screenshot path: {extract_exc}")
 
         # Update listings table if possible
         external_id = listing_details.get("external_id")
         if external_id and screenshot_path:
             try:
                 with get_connection() as conn:
-                    conn.execute(
+                    cur = conn.cursor()
+                    cur.execute(
                         """
                         UPDATE listings
                         SET 
@@ -1009,11 +1012,24 @@ def _run_apply_task(job_id: int, payload: Dict[str, Any]):
                             external_id,
                         ),
                     )
+                    rows_updated = cur.rowcount
                     conn.commit()
+                    logging.info(
+                        f"[BG] ✅ Updated application_screenshot_path for {external_id} "
+                        f"(rows affected: {rows_updated}, path: {screenshot_path})"
+                    )
             except Exception as db_exc:
-                logging.warning(
-                    f"[BG] Failed to update application status in DB for {external_id}: {db_exc}"
+                logging.error(
+                    f"[BG] ❌ Failed to update application status in DB for {external_id}: {db_exc}"
                 )
+        elif external_id and not screenshot_path:
+            logging.warning(
+                f"[BG] ⚠️ No screenshot path extracted for {external_id}, skipping DB update"
+            )
+        elif screenshot_path and not external_id:
+            logging.warning(
+                f"[BG] ⚠️ Have screenshot path but no external_id, cannot update DB"
+            )
 
         _complete_job(
             job_id,

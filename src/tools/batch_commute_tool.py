@@ -5,8 +5,8 @@ from typing import Any
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-# Import the existing google_maps_tool so we can reuse its _run method
-from .google_maps_tool import google_maps_tool
+# Import both the existing google_maps_tool and the new matrix tool
+from .google_maps_tool import google_maps_tool, google_maps_matrix_tool
 
 
 class BatchCommuteInput(BaseModel):
@@ -43,10 +43,58 @@ class BatchCommuteTool(BaseTool):
             return f"999 mins (Error: {e})"
 
     def _run(self, listings: list[dict[str, Any]], destination: str) -> list[str]:
-        commute_times: list[str] = [""] * len(listings)
-
-        # Use ThreadPoolExecutor to parallelize network requests
-        # max_workers=20 allows up to 20 concurrent requests
+        """
+        Compute commute times for all listings.
+        
+        Strategy:
+        1. Try batch Distance Matrix API first (fast, efficient)
+        2. Fall back to parallel individual directions calls if batch fails
+        """
+        if not listings:
+            return []
+        
+        # Build origin addresses
+        origins = []
+        valid_indices = []  # Track which listings have valid addresses
+        
+        for i, listing in enumerate(listings):
+            origin = (
+                f"{listing.get('street', '')}, "
+                f"{listing.get('city', '')} "
+                f"{listing.get('postal_code', '')}, Netherlands"
+            )
+            if "None" not in origin and origin.strip() != ", , Netherlands":
+                origins.append(origin)
+                valid_indices.append(i)
+        
+        # Initialize all with fallback value
+        commute_times: list[str] = ["999 mins (Invalid Address)"] * len(listings)
+        
+        # Try batch Matrix API first if we have valid origins
+        if origins and len(origins) > 1:
+            print(f"[Batch] Attempting Distance Matrix API for {len(origins)} listings")
+            try:
+                matrix_results = google_maps_matrix_tool._run(
+                    origins=origins, 
+                    destination=destination, 
+                    mode="transit"
+                )
+                
+                # Map results back to original listing positions
+                if len(matrix_results) == len(origins):
+                    for result_idx, listing_idx in enumerate(valid_indices):
+                        commute_times[listing_idx] = matrix_results[result_idx]
+                    
+                    print(f"[Batch] Successfully used Distance Matrix API")
+                    return commute_times
+                else:
+                    print(f"[Batch] Matrix API returned unexpected length, falling back")
+            except Exception as e:
+                print(f"[Batch] Matrix API failed ({e}), falling back to individual calls")
+        
+        # Fallback: Use parallel individual directions calls (original behavior)
+        print(f"[Fallback] Using parallel individual direction calls for {len(listings)} listings")
+        
         with ThreadPoolExecutor(max_workers=20) as executor:
             # Map each future to its index
             future_to_index = {
@@ -61,10 +109,6 @@ class BatchCommuteTool(BaseTool):
                     commute_times[index] = result
                 except Exception as e:
                     commute_times[index] = f"999 mins (Error: {e})"
-
-        # Ensure length matches input
-        if len(commute_times) != len(listings):
-            return ["999 mins (Processing Error)"] * len(listings)
 
         return commute_times
 
