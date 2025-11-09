@@ -1518,6 +1518,213 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
         }
 
 
+@app.post("/agent/housing/reason_link")
+def agent_reason_link(request: dict):
+    """
+    Reason about a housing listing URL and extract search parameters with mandatory commute inference.
+    
+    Features:
+    1. Analyze housing listing URLs using AI reasoning
+    2. Extract: city, price, min_size
+    3. ALWAYS infer commute_target (never null) using geographic and contextual reasoning
+    4. Return structured JSON ready for housing_search
+    
+    Parameters:
+    - url: The housing listing URL to analyze (required)
+    
+    Returns:
+    - Structured JSON with city, price, min_size, commute_target (always inferred)
+    """
+    try:
+        url = request.get("url")
+        if not url:
+            return JSONResponse(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error": "URL is required",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        
+        # Check if agent features are available
+        if not AGENT_AVAILABLE:
+            return JSONResponse(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "success": False,
+                    "error": "Web reasoning agent unavailable: missing or invalid configuration (e.g. OPENAI_API_KEY).",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        
+        # Build crew inputs
+        crew_inputs = {"url": url}
+        
+        logging.info(f"Starting web reasoning for URL: {url}")
+        result = run_main_crew("web_reason", crew_inputs, streamlit_callback=None)
+        
+        # Parse the result
+        try:
+            parsed_result = _parse_agent_result(result)
+            
+            # Extract search parameters from the parsed result
+            search_params = {}
+            if isinstance(parsed_result, dict):
+                search_params = parsed_result
+            elif isinstance(parsed_result, str):
+                # Try to parse as JSON
+                try:
+                    search_params = json.loads(parsed_result)
+                except json.JSONDecodeError:
+                    # Extract from text if JSON parsing fails
+                    search_params = {"raw_response": parsed_result}
+            
+            # Validate that all required fields are present
+            required_fields = ["city", "price", "min_size", "commute_target"]
+            missing_fields = [f for f in required_fields if f not in search_params]
+            
+            if missing_fields:
+                logging.warning(f"Missing required fields in reasoning result: {missing_fields}")
+                # Try to extract from raw response
+                if "raw_response" not in search_params:
+                    search_params["raw_response"] = str(result)
+            
+            return {
+                "success": True,
+                "url": url,
+                "search_params": search_params,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            
+        except Exception as parse_error:
+            logging.error(f"Error parsing web reasoning result: {parse_error}", exc_info=True)
+            return {
+                "success": True,
+                "url": url,
+                "search_params": {"raw_response": str(result)},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+    
+    except Exception as e:
+        logging.error(f"Error in agent_reason_link: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
+@app.post("/agent/housing/analyze_link")
+def agent_analyze_link(request: dict):
+    """
+    Analyze and extract structured data from an arbitrary URL.
+    
+    Features:
+    1. Extract data from property listings, LinkedIn profiles, or general web pages.
+    2. Auto-detect content type and extract relevant fields.
+    3. Present structured JSON data for user confirmation.
+    4. Optionally trigger housing_search for confirmed property listings.
+    
+    Parameters:
+    - url: The URL to analyze (required)
+    - confirmed: Whether user has confirmed the data (default: false)
+    - extract_type: Type of content if already known (optional)
+    - Additional fields if confirmed (city, price, size, etc.)
+    
+    Returns:
+    - Extracted structured data as JSON
+    - Confirmation status and next steps
+    """
+    try:
+        url = request.get("url")
+        if not url:
+            return JSONResponse(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error": "URL is required",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        
+        # Check if agent features are available
+        if not AGENT_AVAILABLE:
+            return JSONResponse(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "success": False,
+                    "error": "Web analysis agent unavailable: missing or invalid configuration (e.g. OPENAI_API_KEY).",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        
+        # Build crew inputs
+        crew_inputs = {
+            "url": url,
+            "confirmed": request.get("confirmed", False),
+            "extract_type": request.get("extract_type"),
+            # Additional fields for confirmed property search
+            "city": request.get("city"),
+            "price": request.get("price"),
+            "max_price": request.get("max_price"),
+            "size_m2": request.get("size_m2"),
+            "min_size": request.get("min_size"),
+            "location": request.get("location"),
+            "commute_target": request.get("commute_target"),
+        }
+        
+        logging.info(f"Starting web analysis for URL: {url} (confirmed={crew_inputs['confirmed']})")
+        result = run_main_crew("web_analysis", crew_inputs, streamlit_callback=None)
+        
+        # Parse the result
+        try:
+            parsed_result = _parse_agent_result(result)
+            
+            # Extract data from the parsed result
+            extracted_data = {}
+            if isinstance(parsed_result, dict):
+                extracted_data = parsed_result
+            elif isinstance(parsed_result, str):
+                # Try to parse as JSON
+                try:
+                    extracted_data = json.loads(parsed_result)
+                except json.JSONDecodeError:
+                    extracted_data = {"raw_response": parsed_result}
+            
+            return {
+                "success": True,
+                "url": url,
+                "data": extracted_data,
+                "confirmed": crew_inputs["confirmed"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            
+        except Exception as parse_error:
+            logging.error(f"Error parsing web analysis result: {parse_error}", exc_info=True)
+            return {
+                "success": True,
+                "url": url,
+                "data": {"raw_response": str(result)},
+                "confirmed": crew_inputs["confirmed"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+    
+    except Exception as e:
+        logging.error(f"Error in agent_analyze_link: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
 @app.get("/agent/housing/sessions")
 def list_conversation_sessions(limit: int = 10):
     """List all conversation sessions"""

@@ -107,11 +107,13 @@ def create_master_agent(step_callback=None) -> Agent:
     return Agent(
         role="Housing Search Master Coordinator",
         goal=(
-            "Collect housing search criteria and trigger the search:\n"
+            "Collect housing search criteria and trigger the search ONLY with user consent:\n"
             "STEP 1: Collect ALL 4 pieces: city, budget (max_price), size (min_size), "
             "commute location (commute_target)\n"
-            "STEP 2: Once ALL 4 are collected, YOU MUST USE the trigger_housing_search tool\n"
-            "STEP 3: The tool will handle delegating to other agents automatically"
+            "STEP 2: Once ALL 4 are collected, ASK FOR USER CONFIRMATION\n"
+            "STEP 3: ONLY if user explicitly consents (says 'yes', 'search', 'go ahead'), "
+            "USE the trigger_housing_search tool\n"
+            "STEP 4: If user says 'no', 'stop', 'don't apply', 'wait' - NEVER trigger the search"
         ),
         backstory=(
             "You are a housing search coordinator with ONE critical tool: "
@@ -123,11 +125,15 @@ def create_master_agent(step_callback=None) -> Agent:
             "   - min_size (integer, in m²)\n"
             "   - commute_target (string, address or landmark)\n"
             "2. Ask ONE question at a time naturally\n"
-            "3. When you have ALL 4 pieces with actual values, you MUST call "
-            "trigger_housing_search tool\n"
-            "4. DO NOT just say you will search - USE THE TOOL!\n"
-            "5. The tool will return a signal that triggers the backend to run the search crew\n\n"
-            "Remember: You have the trigger_housing_search tool available. Use it when ready!"
+            "3. When you have ALL 4 pieces with actual values, ASK FOR CONFIRMATION:\n"
+            "   'Would you like me to start the search now?'\n"
+            "4. RESPECT USER CONSENT:\n"
+            "   - If user says YES ('search', 'go ahead', 'yes') → USE trigger_housing_search tool\n"
+            "   - If user says NO ('don't apply', 'stop', 'not yet', 'wait') → DO NOT trigger\n"
+            "   - If user updates criteria → Update but wait for new confirmation\n"
+            "5. NEVER trigger search without explicit user consent!\n"
+            "6. The tool will return a signal that triggers the backend to run the search crew\n\n"
+            "Remember: Consent is MANDATORY. Never auto-trigger even when all data is complete!"
         ),
         tools=[trigger_search_tool],
         allow_delegation=True,  # Allow delegation
