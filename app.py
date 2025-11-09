@@ -117,24 +117,31 @@ def get_user_profile():
 
 
 def parse_crew_result(final_result) -> tuple[str, str | None]:
-    """Parses crew output (Pydantic, raw, dict, etc.) into text and image_path."""
-    result_text: str
+    """Normalize crew output (list RootModel, dict/raw/string) into (text, image_path)."""
     image_path: str | None = None
 
-    json_txt = _json_text(final_result)
-    if json_txt:
-        try:
-            fr = json.loads(json_txt)
-            if isinstance(fr, dict):
-                result_text = fr.get("result") or str(fr)
-            else:
-                result_text = str(fr)
-        except Exception:
-            result_text = str(final_result)
-    elif hasattr(final_result, "raw") and isinstance(final_result.raw, str):
-        result_text = final_result.raw
+    # RootModel list? (Pydantic v2 RootModel / v1 custom models)
+    try:
+        root_list = final_result.root  # type: ignore[attr-defined]
+    except AttributeError:
+        root_list = None
+    if isinstance(root_list, list):
+        result_text = str(root_list)
     else:
-        result_text = str(final_result)
+        json_txt = _json_text(final_result)
+        if json_txt:
+            try:
+                parsed = json.loads(json_txt)
+                if isinstance(parsed, dict):
+                    result_text = parsed.get("result") or str(parsed)
+                else:
+                    result_text = str(parsed)
+            except Exception:
+                result_text = str(final_result)
+        elif hasattr(final_result, "raw") and isinstance(final_result.raw, str):
+            result_text = final_result.raw
+        else:
+            result_text = str(final_result)
 
     if "Screenshot saved as " in result_text:
         path_part = result_text.split("Screenshot saved as ")[-1].strip().rstrip(".")
@@ -146,7 +153,7 @@ def parse_crew_result(final_result) -> tuple[str, str | None]:
 
 def main():
     st.set_page_config(page_title="🤖 Pararius AI Scout (Fixed)", layout="wide")
-    st.title("🤖 Pararius AI Scout (Fixed and Upgraded)")
+    st.title("🤖 Pararius AI Scout (Pydantic parsing fixed)")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -176,15 +183,14 @@ def main():
                         st.image(message["image"], caption="Application Proof")
 
         if st.session_state.search_ready and st.session_state.search_results is None:
-            if st.button("🚀 Start Search for Top 5", type="primary", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": "Start Search!"})
+            if st.button("🚀 Start Search Top 5", type="primary", use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": "Start search!"})
                 with chat_container:
                     with st.chat_message("user"):
-                        st.markdown("Start Search!")
+                        st.markdown("Start search!")
 
                 with st.spinner(
-                    "🕵️‍♂️ SearchAgent scanning... "
-                    "RankingAgent calculating... (This may take a moment)"
+                    "🕵️‍♂️ Searching listings... Ranking listings... (this may take a moment)"
                 ):
                     log_container = col_log.container(height=500, border=True)
                     streamlit_callback = StreamlitCallbackHandler(log_container)
@@ -196,69 +202,69 @@ def main():
                         )
                         results_list: list = []
 
-                        # Result handling: ranking task enforces returning a full JSON list
-                        # final_result should be a list of items with all expected fields.
-
+                        # Normalize final_result to list
                         if isinstance(final_result, list):
                             results_list = final_result
-                        elif isinstance(final_result, dict):
-                            # Pydantic v1/v2 .json() 處理
-                            json_txt = _json_text(final_result)
-                            if json_txt:
+                        else:
+                            try:
+                                root_list = final_result.root  # type: ignore[attr-defined]
+                            except AttributeError:
+                                root_list = None
+                            if isinstance(root_list, list):
+                                results_list = root_list
+                            elif isinstance(final_result, dict):
+                                json_txt = _json_text(final_result)
+                                if json_txt:
+                                    try:
+                                        final_result = json.loads(json_txt)
+                                    except Exception:
+                                        pass
+                                if "results" in final_result and isinstance(
+                                    final_result["results"], list
+                                ):
+                                    results_list = final_result["results"]
+                                elif "listings" in final_result and isinstance(
+                                    final_result["listings"], list
+                                ):
+                                    results_list = final_result["listings"]
+                                elif "result" in final_result and isinstance(
+                                    final_result["result"], list
+                                ):
+                                    results_list = final_result["result"]
+                                else:
+                                    st.session_state.final_result_md = (
+                                        "Search finished, but output format unexpected "
+                                        "(not a list). Raw: "
+                                        f"{str(final_result)}"
+                                    )
+                            elif isinstance(final_result, str):
+                                clean_json_str = strip_markdown_json(final_result)
                                 try:
-                                    final_result = json.loads(json_txt)
-                                except Exception:
-                                    pass  # 保持 final_result 為 dict
-
-                            # 檢查常見的包裝鍵
-                            if "results" in final_result and isinstance(
-                                final_result["results"], list
-                            ):
-                                results_list = final_result["results"]
-                            elif "listings" in final_result and isinstance(
-                                final_result["listings"], list
-                            ):
-                                results_list = final_result["listings"]
-                            elif "result" in final_result and isinstance(
-                                final_result["result"], list
-                            ):
-                                results_list = final_result["result"]
+                                    parsed = json.loads(clean_json_str)
+                                    if isinstance(parsed, list):
+                                        results_list = parsed
+                                except Exception as e:
+                                    st.session_state.final_result_md = (
+                                        "Search finished, but failed parsing string: "
+                                        f"{e}. Raw: {final_result}"
+                                    )
                             else:
                                 st.session_state.final_result_md = (
-                                    "Search completed, but output format unexpected "
-                                    "(not a list). Raw: "
-                                    f"{str(final_result)}"
+                                    "Search finished, but output type unsupported: "
+                                    f"{type(final_result)}"
                                 )
-                        elif isinstance(final_result, str):
-                            clean_json_str = strip_markdown_json(final_result)
-                            try:
-                                parsed = json.loads(clean_json_str)
-                                if isinstance(parsed, list):
-                                    results_list = parsed
-                            except Exception as e:
-                                st.session_state.final_result_md = (
-                                    "Search completed, but failed to parse string: "
-                                    f"{e}. Raw: {final_result}"
-                                )
-                        else:
-                            st.session_state.final_result_md = (
-                                "Search completed, but unsupported output type: "
-                                f"{type(final_result)}"
-                            )
 
                         st.session_state.search_results = results_list
                         st.session_state.final_result_md = (
-                            f"Found {len(results_list)} matching properties!"
+                            f"Found {len(results_list)} matching listings!"
                         )
                         if not results_list and not st.session_state.final_result_md:
                             st.session_state.final_result_md = (
-                                "Search finished, but no matching listings were found."
+                                "Search finished, no matching listings found."
                             )
 
                     except Exception as e:
-                        st.session_state.final_result_md = (
-                            f"An error occurred while executing the crew: {e}"
-                        )
+                        st.session_state.final_result_md = f"Error while running crew: {e}"
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": st.session_state.final_result_md}
@@ -269,29 +275,26 @@ def main():
             with chat_container:
                 st.subheader("Top 5 Matches")
 
-                # 確保 search_results 是個列表
+                # Ensure search_results is a list
                 if not isinstance(st.session_state.search_results, list):
-                    st.error("結果非列表，無法顯示。")
+                    st.error("Result is not a list; cannot display.")
                     results_df = pd.DataFrame()
                 else:
                     results_df = pd.DataFrame(st.session_state.search_results)
 
-                # 檢查 DataFrame 是否為空或缺少關鍵欄位
+                # Check if DataFrame empty or missing key columns
                 if results_df.empty:
-                    st.warning("Results found, but the list is empty.")
+                    st.warning("Got a result but the list is empty.")
                 elif "title" not in results_df.columns or "url" not in results_df.columns:
-                    st.error(
-                        "Returned data is missing 'title' or 'url' fields. "
-                        "Cannot show apply buttons."
-                    )
+                    st.error("Missing 'title' or 'url' field in data; cannot show apply buttons.")
                     st.dataframe(results_df, use_container_width=True)
                 else:
                     st.dataframe(results_df, use_container_width=True)
                     st.markdown("---")
 
-                    # --- 新功能：Apply All Button ---
+                    # --- Feature: Apply All Button ---
                     if st.button(
-                        "🚀🚀 Apply to All Top 5 Listings",
+                        "🚀🚀 Apply to ALL Top 5",
                         type="primary",
                         use_container_width=True,
                         key="apply_all",
@@ -300,14 +303,13 @@ def main():
                             {"role": "user", "content": "Apply to all Top 5!"}
                         )
                         with st.spinner(
-                            "🚀 Applying in batch... "
-                            "(This may take a few minutes; please don't close) ☕"
+                            "🚀 Batch applying... (this can take a few minutes, don't close) ☕"
                         ):
                             user_profile_dict = get_user_profile()
                             total = len(st.session_state.search_results)
 
                             for i, listing in enumerate(st.session_state.search_results):
-                                # 每次循環都重置日誌容器
+                                # Reset log container each iteration
                                 log_container = col_log.container(height=500, border=True)
                                 log_container.info(
                                     f"--- Applying {i+1}/{total}: {listing.get('title')} ---"
@@ -340,22 +342,22 @@ def main():
                                     )
 
                         st.session_state.messages.append(
-                            {"role": "assistant", "content": "✅ Batch apply completed!"}
+                            {"role": "assistant", "content": "✅ Batch apply finished!"}
                         )
                         st.rerun()
 
                     st.markdown("---")
-                    st.markdown("Or select a single listing to apply:")
+                    st.markdown("Or apply to a single listing:")
 
-                    # --- 單一申請按鈕 ---
+                    # --- Single apply buttons ---
                     for i, listing in enumerate(st.session_state.search_results):
                         if st.button(
-                            f"Apply for Listing #{i+1} ({listing.get('title', 'N/A')})",
+                            f"Apply listing #{i+1} ({listing.get('title', 'N/A')})",
                             key=f"apply_{i}",
                             use_container_width=True,
                         ):
                             with st.spinner(
-                                f"🚀 ApplyAgent is logging in and applying for Listing #{i+1}..."
+                                f"🚀 ApplyAgent logging in and applying listing #{i+1}..."
                             ):
                                 log_container = col_log.container(height=500, border=True)
                                 streamlit_callback = StreamlitCallbackHandler(log_container)
@@ -387,27 +389,27 @@ def main():
                                     )
                             st.rerun()
 
-        if prompt := st.chat_input("Your message..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(prompt)
+    if prompt := st.chat_input("Your message..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-            update_criteria_from_prompt(prompt)
-            response = get_next_chat_response()
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            with chat_container:
-                with st.chat_message("assistant"):
-                    st.markdown(response)
+        update_criteria_from_prompt(prompt)
+        response = get_next_chat_response()
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        with chat_container:
+            with st.chat_message("assistant"):
+                st.markdown(response)
 
-            if st.session_state.search_ready:
-                st.rerun()
+        if st.session_state.search_ready:
+            st.rerun()
 
     with col_log:
         st.subheader("2. AI Execution Log")
         if not any(st.session_state.get(key) for key in ["search_ready", "search_results"]):
             st.container(height=500, border=True).markdown(
-                "*(The agent's thought process will appear here while a task is running...)*"
+                "*(Agent thoughts will stream here during execution...)*"
             )
 
 

@@ -23,7 +23,7 @@ class ListingsInput(BaseModel):
         default="first_seen", description="Sort field"
     )
     order_dir: Literal["asc", "desc"] | None = Field(default="desc", description="Sort direction")
-    limit: int = Field(default=20, description="Number of results to return")
+    limit: int = Field(default=10, description="Number of results to return")
 
 
 class BackendApiTool(BaseTool):
@@ -40,7 +40,7 @@ class BackendApiTool(BaseTool):
         q: str | None = None,
         order_by: str = "first_seen",
         order_dir: str = "desc",
-        limit: int = 20,
+        limit: int = 10,
     ) -> str:
 
         # Build query parameter dict
