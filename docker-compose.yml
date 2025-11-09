@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./backend:/app/backend
       - ./src:/app/src
@@ -42,16 +42,19 @@ services:
       - ./backend/data:/data 
     command: ["datasette", "serve", "/data/housing.db", "--host", "0.0.0.0", "--port", "8001"]
 
-  frontend:
+  nginx:
     build:
       context: .
       dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    env_file:
+      - .env
     depends_on:
       - backend
-    environment:
-      VITE_API_BASE_URL: http://localhost:8000
-    volumes:
-      - ./images:/app/images
     ports:
-      - "5173:5173"
+      - "80:80"
+    volumes:
+      - ./images:/app/images:ro
+      - ./output:/app/output:ro
     restart: unless-stopped

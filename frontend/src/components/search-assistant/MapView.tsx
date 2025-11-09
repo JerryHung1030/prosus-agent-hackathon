@@ -243,7 +243,11 @@ const MapView = ({ preferences }: MapViewProps) => {
           items = agentListings;
         } else {
           // Fallback: fetch all listings from the API with filters
-          const url = new URL(`${BACKEND_BASE_URL}/listings`);
+          // Handle both absolute URLs (http://...) and relative URLs (/api)
+          const baseUrl = BACKEND_BASE_URL.startsWith('http') 
+            ? BACKEND_BASE_URL 
+            : window.location.origin + BACKEND_BASE_URL;
+          const url = new URL(`${baseUrl}/listings`);
           url.searchParams.set("lat", mapCenter.lat.toFixed(6));
           url.searchParams.set("lng", mapCenter.lng.toFixed(6));
           url.searchParams.set("radius", radiusKm.toFixed(2));

@@ -46,10 +46,10 @@ const SearchAssistant = () => {
       </header>
 
       {/* Main Content */}
-      <div className="container mx-auto px-4 py-6">
-        <div className="grid lg:grid-cols-[1fr,1.2fr] gap-6 h-[calc(100vh-140px)]">
+      <div className="container mx-auto px-4 py-6 h-[calc(100vh-100px)] overflow-hidden">
+        <div className="grid lg:grid-cols-[1fr,1.2fr] gap-6 h-full">
           {/* Chat Section */}
-          <div className="flex flex-col">
+          <div className="flex flex-col h-full min-h-0">
             <ChatInterface 
               onPreferencesUpdate={setPreferences}
               preferences={preferences}
@@ -57,7 +57,7 @@ const SearchAssistant = () => {
           </div>
 
           {/* Map Section */}
-          <div className="flex flex-col">
+          <div className="flex flex-col h-full min-h-0">
             <MapView preferences={preferences} />
           </div>
         </div>

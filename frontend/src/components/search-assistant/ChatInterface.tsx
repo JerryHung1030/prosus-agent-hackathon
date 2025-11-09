@@ -349,13 +349,6 @@ const ChatInterface = ({ onPreferencesUpdate, preferences }: ChatInterfaceProps)
 
   return (
     <Card className="flex flex-col h-full glass glass-dark">
-      {/* Preferences Display */}
-      {Object.keys(preferences).length > 0 && (
-        <div className="p-4 border-b">
-          <PreferenceChips preferences={preferences} />
-        </div>
-      )}
-
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((message, index) => (
