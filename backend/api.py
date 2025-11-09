@@ -9,11 +9,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from db import get_connection, init_db
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
+
+from .db import get_connection, init_db
 
 app = FastAPI(title="Listings API")
 
@@ -25,11 +27,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+load_dotenv()  # Load environment variables from .env if present
 init_db()  # Ensure tables exist on startup
 
 # Import agent runner from sibling src/ package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.main import run_main_crew
+
+# Load API keys from environment
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 
 # ---------- Pydantic models ----------
