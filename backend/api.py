@@ -10,12 +10,24 @@ from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import status as http_status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import (
+    FileResponse,  # [MODIFIED] Import FileResponse
+    JSONResponse,
+)
 from pydantic import BaseModel, EmailStr, Field
 
-from .db import get_connection, init_db
+from .db import (
+    get_connection,
+    init_db,
+)
+
+# Import agent runner from sibling src/ package (path adjustment then import)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from src.main import run_main_crew
+from src.memory import ConversationMemory  # [MODIFIED] Import ConversationMemory
 
 app = FastAPI(title="Listings API")
 
@@ -29,10 +41,6 @@ app.add_middleware(
 
 load_dotenv()  # Load environment variables from .env if present
 init_db()  # Ensure tables exist on startup
-
-# Import agent runner from sibling src/ package
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.main import run_main_crew
 
 # Load API keys from environment
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
@@ -86,30 +94,51 @@ class ListingIn(BaseModel):
 
 
 class LLMStartIn(BaseModel):
-    status: str = "running"  # default running
-    start_time: Optional[str] = None  # can be passed by LLM, otherwise use current time
+    status: str = "running"  # Default status is running
+    start_time: Optional[str] = (
+        None  # May be provided by LLM; otherwise current time is used
+    )
 
 
 class LLMFinishIn(BaseModel):
     job_id: int
-    status: str  # finished / error
+    status: str  # Possible values: finished / error
     result: Optional[Dict[str, Any]] = (
-        None  # JSON object: {"text": "...", "image_path": "..."}
+        None  # JSON object payload e.g. {"text": "...", "image_path": "..."}
     )
     end_time: Optional[str] = None
 
 
 # ---------- Agent Housing Search models ----------
 class HousingSearchRequest(BaseModel):
-    city: Optional[str] = Field(None, description="城市名稱，例如：Amsterdam")
-    max_price: Optional[int] = Field(None, description="最高價格")
-    min_size: Optional[int] = Field(None, description="最小面積（平方米）")
-    commute_target: Optional[str] = Field(None, description="通勤目的地地址")
+    city: Optional[str] = Field(None, description="City name, e.g., Amsterdam")
+    max_price: Optional[int] = Field(None, description="Maximum price")
+    min_size: Optional[int] = Field(None, description="Minimum size (square meters)")
+    commute_target: Optional[str] = Field(
+        None, description="Commute destination address"
+    )
 
 
 class HousingApplyRequest(BaseModel):
-    user_profile: Dict[str, Any] = Field(..., description="用戶個人資料")
-    listing_details: Dict[str, Any] = Field(..., description="房源詳細資料")
+    user_profile: Dict[str, Any] = Field(..., description="User profile data")
+    listing_details: Dict[str, Any] = Field(..., description="Listing details data")
+
+
+# [NEW] Model for Chat API
+class ChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str = ""
+
+
+# ---------- Async Job models ----------
+class JobStatusResponse(BaseModel):
+    id: int
+    status: Literal["running", "finished", "error"]
+    job_type: Optional[str] = None
+    session_id: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
 
 
 # ---------- Ingest endpoints ----------
@@ -312,7 +341,8 @@ async def ingest_listings(items: List[ListingIn]):
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance between two points on Earth using haversine formula. Returns km."""
+    """Calculate distance between two points on Earth using haversine formula.
+    Returns km."""
     R = 6371  # Earth radius in km
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -328,6 +358,7 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 @app.get("/listings")
 def list_listings(
+    id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     city: Optional[str] = None,
@@ -356,6 +387,7 @@ def list_listings(
 ):
     """
     List listings with optional filtering by:
+    - id: if provided, returns only that specific listing (by id or external_id)
     - city: fuzzy match on city name
     - lat/lng/radius_km: geo-based filtering (all 3 required together)
     - price, area, pets, etc.
@@ -394,77 +426,93 @@ def list_listings(
         "longitude",
         "created_at",
         "updated_at",
+        "application_status",  # [MODIFIED] Include new status fields
+        "application_screenshot_path",  # [MODIFIED] Include new status fields
     ]
     if include_raw:
         cols.append("raw_json")
 
-    where = []
-    params: List[object] = []
-
-    use_geo_filter = lat is not None and lng is not None and radius is not None
-
-    if use_geo_filter:
-        # Narrow Optional types since we checked use_geo_filter above
-        lat_f = float(lat)  # type: ignore[arg-type]
-        lng_f = float(lng)  # type: ignore[arg-type]
-        rad_f = float(radius)  # type: ignore[arg-type]
-
-        # Filter by lat/lng with bounding box for efficiency (1 deg ~ 111km)
-        # Guard against negative radius values
-        effective_radius = rad_f if rad_f > 0 else 0.0
-        lat_delta = effective_radius / 111.0
-        # Avoid divide-by-zero issues for longitude degrees at poles
-        cos_lat = math.cos(math.radians(lat_f))
-        lng_delta = (
-            effective_radius / (111.0 * cos_lat) if effective_radius > 0 else 0.0
-        )
-
-        where.append("latitude IS NOT NULL")
-        where.append("longitude IS NOT NULL")
-        where.append("latitude BETWEEN ? AND ?")
-        params.extend([lat_f - lat_delta, lat_f + lat_delta])
-        where.append("longitude BETWEEN ? AND ?")
-        params.extend([lng_f - lng_delta, lng_f + lng_delta])
-
-    if city:
-        where.append("LOWER(city) LIKE ?")
-        params.append(f"%{city.lower()}%")
-
-    if min_price is not None:
-        where.append("price_amount >= ?")
-        params.append(min_price)
-
-    if max_price is not None:
-        where.append("price_amount <= ?")
-        params.append(max_price)
-
-    if min_area is not None:
-        where.append("area_m2 >= ?")
-        params.append(min_area)
-
-    if max_area is not None:
-        where.append("area_m2 <= ?")
-        params.append(max_area)
-
-    if pets_allowed is not None:
-        where.append("pets_allowed = ?")
-        params.append(1 if pets_allowed else 0)
-
-    if since:
-        where.append("first_seen >= ?")
-        params.append(since)
-
-    if q:
-        where.append(
-            "(title LIKE ? OR street LIKE ? OR neighborhood LIKE ? OR city LIKE ?)"
-        )
-        like = f"%{q}%"
-        params.extend([like, like, like, like])
-
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
     with get_connection() as conn:
         cur = conn.cursor()
+
+        # If id is provided, directly query that single listing
+        if id:
+            cur.execute(
+                f"SELECT {', '.join(cols)} FROM listings WHERE id = ? OR external_id = ? LIMIT 1",
+                (id, id),
+            )
+            row = cur.fetchone()
+            return {
+                "total": 1 if row else 0,
+                "limit": 1,
+                "offset": 0,
+                "items": [dict(row)] if row else [],
+            }
+
+        where = []
+        params: List[object] = []
+
+        use_geo_filter = lat is not None and lng is not None and radius is not None
+
+        if use_geo_filter:
+            # Narrow Optional types since we checked use_geo_filter above
+            lat_f = float(lat)  # type: ignore[arg-type]
+            lng_f = float(lng)  # type: ignore[arg-type]
+            rad_f = float(radius)  # type: ignore[arg-type]
+
+            # Filter by lat/lng with bounding box for efficiency (1 deg ~ 111km)
+            # Guard against negative radius values
+            effective_radius = rad_f if rad_f > 0 else 0.0
+            lat_delta = effective_radius / 111.0
+            # Avoid divide-by-zero issues for longitude degrees at poles
+            cos_lat = math.cos(math.radians(lat_f))
+            lng_delta = (
+                effective_radius / (111.0 * cos_lat) if effective_radius > 0 else 0.0
+            )
+
+            where.append("latitude IS NOT NULL")
+            where.append("longitude IS NOT NULL")
+            where.append("latitude BETWEEN ? AND ?")
+            params.extend([lat_f - lat_delta, lat_f + lat_delta])
+            where.append("longitude BETWEEN ? AND ?")
+            params.extend([lng_f - lng_delta, lng_f + lng_delta])
+
+        if city:
+            where.append("LOWER(city) LIKE ?")
+            params.append(f"%{city.lower()}%")
+
+        if min_price is not None:
+            where.append("price_amount >= ?")
+            params.append(min_price)
+
+        if max_price is not None:
+            where.append("price_amount <= ?")
+            params.append(max_price)
+
+        if min_area is not None:
+            where.append("area_m2 >= ?")
+            params.append(min_area)
+
+        if max_area is not None:
+            where.append("area_m2 <= ?")
+            params.append(max_area)
+
+        if pets_allowed is not None:
+            where.append("pets_allowed = ?")
+            params.append(1 if pets_allowed else 0)
+
+        if since:
+            where.append("first_seen >= ?")
+            params.append(since)
+
+        if q:
+            where.append(
+                "(title LIKE ? OR street LIKE ? OR neighborhood LIKE ? OR city LIKE ?)"
+            )
+            like = f"%{q}%"
+            params.extend([like, like, like, like])
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
         # Fetch all matching rows
         cur.execute(
@@ -595,51 +643,240 @@ def llm_status(limit: int = 10):
     return {"count": len(rows), "items": rows}
 
 
+# ---------- Lightweight async job queue helpers ----------
+def _create_job(session_id: Optional[str], job_type: str) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO llm_jobs (session_id, job_type, status, start_time) VALUES (?, ?, ?, ?)",
+            (session_id, job_type, "running", now),
+        )
+        conn.commit()
+        job_id = cur.lastrowid
+        if job_id is None:
+            raise RuntimeError("Failed to create job id")
+        return job_id
+
+
+def _complete_job(
+    job_id: int,
+    status: Literal["finished", "error"],
+    result: Optional[Dict[str, Any]] = None,
+):
+    end_time = datetime.now(timezone.utc).isoformat()
+    result_json = json.dumps(result) if result is not None else None
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE llm_jobs SET status=?, result=?, end_time=? WHERE id=?",
+            (status, result_json, end_time, job_id),
+        )
+        conn.commit()
+
+
+def _parse_agent_result(result: Any) -> Dict[str, Any]:
+    """Best-effort parse of Agent result into a dict with optional 'listings'."""
+    # Try common attributes
+    raw_text = None
+    if hasattr(result, "json_dict") and getattr(result, "json_dict"):
+        try:
+            return dict(getattr(result, "json_dict"))
+        except Exception:
+            pass
+    if hasattr(result, "raw"):
+        try:
+            raw_text = str(getattr(result, "raw"))
+        except Exception:
+            raw_text = str(result)
+    else:
+        raw_text = str(result)
+
+    # Try to extract JSON object/array from text
+    try:
+        import re
+
+        match = re.search(r"(\[.*\]|\{.*\})", raw_text, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(1))
+        else:
+            parsed = json.loads(raw_text)
+    except Exception:
+        # Fallback to returning raw text
+        return {"raw": raw_text}
+
+    # Normalize to dict with 'listings' when possible
+    if isinstance(parsed, dict):
+        if "listings" in parsed:
+            return parsed
+        if "results" in parsed:
+            return {**parsed, "listings": parsed.get("results", [])}
+        return parsed
+    if isinstance(parsed, list):
+        return {"listings": parsed}
+    return {"raw": raw_text}
+
+
+def _run_search_task(job_id: int, session_id: Optional[str], criteria: Dict[str, Any]):
+    """Background worker: run housing_search and persist results to llm_jobs (and memory)."""
+    try:
+        logging.info(
+            f"[BG] Starting housing_search job_id={job_id} session_id={session_id} criteria={criteria}"
+        )
+        result = run_main_crew(
+            "housing_search", {"criteria": criteria}, streamlit_callback=None
+        )
+        parsed = _parse_agent_result(result)
+        listings = parsed.get("listings", [])
+
+        # Persist to conversation memory if session_id provided
+        try:
+            if session_id:
+                mem = ConversationMemory()
+                mem.save_search_results(session_id, listings)
+                mem.update_status(session_id, "AWAITING_APPLY_DECISION")
+        except Exception as mem_exc:
+            logging.warning(f"[BG] Failed to update conversation memory: {mem_exc}")
+
+        _complete_job(job_id, "finished", {"listings": listings})
+        logging.info(
+            f"[BG] housing_search completed job_id={job_id} with {len(listings)} listings"
+        )
+    except Exception as e:
+        logging.exception(f"[BG] housing_search error job_id={job_id}: {e}")
+        _complete_job(job_id, "error", {"error": str(e)})
+
+
+def _run_apply_task(job_id: int, payload: Dict[str, Any]):
+    """Background worker: run housing_apply and persist results to llm_jobs and DB."""
+    try:
+        user_profile = payload.get("user_profile")
+        listing_details = payload.get("listing_details") or {}
+
+        crew_inputs = {
+            "user_profile": json.dumps(user_profile),
+            "listing_details": json.dumps(listing_details),
+        }
+
+        logging.info(
+            f"[BG] Starting housing_apply job_id={job_id} external_id={listing_details.get('external_id')}"
+        )
+        result = run_main_crew("housing_apply", crew_inputs, streamlit_callback=None)
+
+        # Extract raw text
+        if hasattr(result, "raw") and isinstance(result.raw, str):
+            result_text = result.raw
+        else:
+            result_text = str(result)
+
+        # Try to extract screenshot path
+        screenshot_path = None
+        if isinstance(result_text, str) and "Screenshot saved as " in result_text:
+            try:
+                path_part = (
+                    result_text.split("Screenshot saved as ")[-1].strip().rstrip(".")
+                )
+                if os.path.exists(path_part) and path_part.endswith(".png"):
+                    screenshot_path = path_part
+            except Exception:
+                pass
+
+        # Update listings table if possible
+        external_id = listing_details.get("external_id")
+        if external_id and screenshot_path:
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        UPDATE listings
+                        SET 
+                            application_status = ?,
+                            application_screenshot_path = ?,
+                            updated_at = ?
+                        WHERE external_id = ?
+                        """,
+                        (
+                            "applied",
+                            screenshot_path,
+                            datetime.now(timezone.utc).isoformat(),
+                            external_id,
+                        ),
+                    )
+                    conn.commit()
+            except Exception as db_exc:
+                logging.warning(
+                    f"[BG] Failed to update application status in DB for {external_id}: {db_exc}"
+                )
+
+        _complete_job(
+            job_id,
+            "finished",
+            {"message": result_text, "screenshot_path": screenshot_path},
+        )
+        logging.info(f"[BG] housing_apply completed job_id={job_id}")
+    except Exception as e:
+        logging.exception(f"[BG] housing_apply error job_id={job_id}: {e}")
+        _complete_job(job_id, "error", {"error": str(e)})
+
+
+# ---------- Job status endpoint for polling ----------
+@app.get("/jobs/status/{job_id}", response_model=JobStatusResponse)
+def get_job_status(job_id: int):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, status, job_type, session_id, start_time, end_time, result FROM llm_jobs WHERE id=?",
+            (job_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+        data = dict(row)
+        if data.get("result"):
+            try:
+                data["result"] = json.loads(data["result"])  # type: ignore[assignment]
+            except Exception:
+                data["result"] = None
+        return data  # FastAPI will coerce to JobStatusResponse
+
+
 # ---------- Agent Housing endpoints ----------
 
 
 @app.post("/agent/housing/search")
 def agent_housing_search(request: HousingSearchRequest):
     """
-    使用 AI Agent 搜尋和排名房源
+    Use AI Agents to search and rank housing listings.
 
-    功能：
-    1. 使用 Search Agent 從資料庫獲取符合條件的房源
-    2. 使用 Ranking Agent 計算通勤時間並排名前 5 個房源
+    Features:
+    1. Search Agent fetches listings from the database matching criteria.
+    2. Ranking Agent computes commute times and ranks the top 5 listings.
 
-    參數：
-    - city: 城市名稱（可選）
-    - max_price: 最高價格（可選）
-    - min_size: 最小面積（可選）
-    - commute_target: 通勤目的地地址（可選）
+    Parameters:
+    - city: City name (optional)
+    - max_price: Maximum price (optional)
+    - min_size: Minimum size (optional)
+    - commute_target: Commute destination address (optional)
 
-    返回：
-    - 前 5 個排名的房源，包含 match_score 和 commute_time
+    Returns:
+    - Top 5 ranked listings including match_score and commute_time.
     """
     try:
-        # 構建搜尋條件
+        # Build search criteria
         criteria = {
             "city": request.city,
-            "price": request.max_price,
-            "size": request.min_size,
+            "max_price": request.max_price,
+            "min_size": request.min_size,
             "commute_target": request.commute_target or "Amsterdam Central Station",
         }
-
-        # 準備 crew 輸入
         crew_inputs = {"criteria": criteria}
 
-        # 執行 housing_search crew（包含 Search Agent 和 Ranking Agent）
         logging.info(f"Starting housing search with criteria: {criteria}")
         result = run_main_crew("housing_search", crew_inputs, streamlit_callback=None)
 
-        # 解析結果
+        # Parse crew result
         try:
-            # 嘗試從不同的格式解析結果
             result_str = None
             parsed_result = None
-
-            # CrewAI 可能返回不同的格式
-            # 1. 嘗試 json_dict 屬性
             if hasattr(result, "json_dict"):
                 try:
                     if result.json_dict:
@@ -647,31 +884,20 @@ def agent_housing_search(request: HousingSearchRequest):
                         result_str = json.dumps(parsed_result)
                 except Exception:
                     pass
-
-            # 2. 如果還沒有結果，嘗試 raw 屬性（最常見）
             if not parsed_result and hasattr(result, "raw"):
                 try:
                     result_str = result.raw
                 except Exception:
                     pass
-
-            # 3. 如果還沒有結果，嘗試 str()
             if not parsed_result and not result_str:
                 result_str = str(result)
-
-            # 如果 result_str 是字串，嘗試解析 JSON
             if isinstance(result_str, str) and not parsed_result:
-                # 嘗試提取 JSON（可能包含在文字中）
                 import re
 
-                # 尋找 JSON 陣列或物件
                 json_match = re.search(r"(\[.*\]|\{.*\})", result_str, re.DOTALL)
                 if json_match:
                     result_str = json_match.group(1)
-
                 parsed_result = json.loads(result_str)
-
-            # 處理不同的返回格式
             if isinstance(parsed_result, dict):
                 if "results" in parsed_result:
                     listings = parsed_result["results"]
@@ -683,7 +909,6 @@ def agent_housing_search(request: HousingSearchRequest):
                 listings = parsed_result
             else:
                 listings = []
-
             return {
                 "success": True,
                 "criteria": criteria,
@@ -691,19 +916,16 @@ def agent_housing_search(request: HousingSearchRequest):
                 "listings": listings,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-
         except (json.JSONDecodeError, AttributeError, TypeError) as e:
             logging.error(f"Failed to parse agent result as JSON: {e}")
-            # 如果解析失敗，返回原始結果
             raw_output = str(result)
             return {
                 "success": False,
                 "error": f"Failed to parse agent result: {str(e)}",
-                "raw_result": raw_output[:500],  # 只返回前 500 字元避免太長
-                "hint": "Agent 可能返回了非 JSON 格式的結果，請檢查 Task 設定",
+                "raw_result": raw_output[:500],
+                "hint": "Agent may have returned non-JSON output; please check task configuration.",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-
     except Exception as e:
         logging.error(f"Error in agent_housing_search: {e}", exc_info=True)
         return {
@@ -714,103 +936,71 @@ def agent_housing_search(request: HousingSearchRequest):
 
 
 @app.post("/agent/housing/apply")
-def agent_housing_apply(request: HousingApplyRequest):
+def agent_housing_apply(
+    request: HousingApplyRequest, background_tasks: BackgroundTasks
+):
     """
-    使用 AI Agent 自動申請房源
+    Use AI Agent to automatically apply for a housing listing.
 
-    功能：
-    1. 使用 Apply Agent 生成個性化的動機信
-    2. 自動填寫申請表單並提交
-    3. 截圖保存申請證明
+    Features:
+    1. Apply Agent generates a personalized motivation letter.
+    2. Automatically fills and submits the application form.
+    3. Captures a screenshot as application proof.
+    4. [MODIFIED] Stores application status and screenshot path in the database.
 
-    參數：
-    - user_profile: 用戶個人資料（包含姓名、email、電話等）
-    - listing_details: 房源詳細資料
-
-    返回：
-    - 申請結果和截圖路徑
+    Returns:
+    - Application result and screenshot path.
     """
     try:
-        # 準備 crew 輸入
-        crew_inputs = {
-            "user_profile": json.dumps(request.user_profile),
-            "listing_details": json.dumps(request.listing_details),
+        # Queue background application task
+        payload = {
+            "user_profile": request.user_profile,
+            "listing_details": request.listing_details,
         }
+        job_id = _create_job(session_id=None, job_type="apply")
+        background_tasks.add_task(_run_apply_task, job_id, payload)
 
-        # 執行 housing_apply crew（Apply Agent）
-        logging.info(
-            f"Starting housing application for listing: {request.listing_details.get('title', 'N/A')}"
+        started_msg = "已開始代填申請表，這可能需要一分鐘..."
+        return JSONResponse(
+            status_code=http_status.HTTP_202_ACCEPTED,
+            content={
+                "success": True,
+                "status": "APPLY_STARTED",
+                "job_id": job_id,
+                "response": started_msg,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
         )
-        result = run_main_crew("housing_apply", crew_inputs, streamlit_callback=None)
-
-        # 解析結果
-        result_text = None
-        if hasattr(result, "raw") and isinstance(result.raw, str):
-            result_text = result.raw
-        else:
-            try:
-                result_text = str(result)
-            except Exception:
-                result_text = ""
-
-        # 嘗試提取截圖路徑
-        screenshot_path = None
-        if isinstance(result_text, str) and "Screenshot saved as " in result_text:
-            try:
-                path_part = (
-                    result_text.split("Screenshot saved as ")[-1].strip().rstrip(".")
-                )
-                if os.path.exists(path_part) and path_part.endswith(".png"):
-                    screenshot_path = path_part
-            except Exception as e:
-                logging.error(f"Error parsing screenshot path: {e}")
-
-        return {
-            "success": True,
-            "message": result_text,
-            "screenshot_path": screenshot_path,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
     except Exception as e:
-        logging.error(f"Error in agent_housing_apply: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        logging.error(f"Error queueing housing_apply: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/agent/housing/chat")
-def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
+def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """
-    對話式房源搜尋
+    Conversational housing search (Flow Steps 1-7)
 
-    功能：
-    1. 與用戶進行自然對話
-    2. 逐步收集房源搜尋條件（城市、價格、面積、通勤地點）
-    3. 儲存對話歷史
-    4. 當資訊完整時自動觸發搜尋
-
-    參數：
-    - session_id: 會話 ID（可選，如果是新對話則不提供）
-    - message: 用戶訊息
-
-    返回：
-    - Agent 的回覆和更新的會話狀態
+    Features:
+    1. Natural conversation with the user.
+    2. Incrementally collects search criteria (city, max_price, min_size, commute_target).
+    3. Stores conversation history.
+    4. Automatically triggers search when criteria are complete (Flow Steps 4-6).
+    5. [MODIFIED] After search completes, asks whether to apply (Flow Step 7).
     """
     try:
-        from src.memory import ConversationMemory
-
-        # 初始化記憶體
+        # Initialize memory
         memory = ConversationMemory()
 
-        # 如果沒有 session_id，創建新會話
+        session_id = request.session_id
+        message = request.message
+
+        # If no session_id provided, create a new session
         if not session_id:
             session_id = memory.create_session()
             logging.info(f"Created new conversation session: {session_id}")
 
-        # 獲取會話
+        # Retrieve existing session
         session = memory.get_session(session_id)
         if not session:
             return {
@@ -819,10 +1009,46 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-        # 儲存用戶訊息
+        # Persist user's message
         memory.add_message(session_id, "user", message)
 
-        # 準備對話上下文
+        # --- [NEW] Handle post-search flow (Flow Step 7) ---
+        if session["status"] == "AWAITING_APPLY_DECISION":
+            positive_responses = ["yes", "好", "要", "請", "apply", "y", "ok"]
+
+            if any(kw in message.lower() for kw in positive_responses):
+                memory.update_status(session_id, "APPLY_APPROVED")
+                agent_response = "Great! I'm ready. Click 'Apply' on any listing you're interested in and I'll start the application for you."
+                memory.add_message(session_id, "assistant", agent_response)
+
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "response": agent_response,
+                    "criteria": session["criteria"],
+                    "is_complete": True,
+                    "status": "APPLY_APPROVED",
+                    "listings": session.get("search_results"),  # Resend listings
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                # User declined or provided a different response
+                memory.update_status(session_id, "COMPLETED_NO_APPLY")
+                agent_response = "No problem. If you change your mind later, you can come back to apply. Have a great day!"
+                memory.add_message(session_id, "assistant", agent_response)
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "response": agent_response,
+                    "criteria": session["criteria"],
+                    "is_complete": True,
+                    "status": "COMPLETED_NO_APPLY",
+                    "listings": session.get("search_results"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+        # --- End of [NEW] ---
+
+        # Prepare conversation context for the agent
         conversation_history = memory.format_conversation_history(session_id, limit=10)
         current_criteria = memory.get_criteria(session_id)
 
@@ -833,21 +1059,13 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
             "current_criteria": current_criteria,
         }
 
-        # 執行對話 Agent
+        # Execute the conversation agent
         logging.info(f"Processing conversation for session {session_id}")
         logging.info(f"Current criteria: {current_criteria}")
         result = run_main_crew("conversation", crew_inputs, streamlit_callback=None)
 
-        # 解析結果
+        # result
         try:
-            # 檢查 result 物件的所有屬性
-            print(f"\n{'='*60}")
-            print("DEBUG: Result object attributes:")
-            print(
-                f"  - dir(result): {[attr for attr in dir(result) if not attr.startswith('_')]}"
-            )
-            print(f"{'='*60}\n")
-
             result_str = None
             if hasattr(result, "raw"):
                 result_str = result.raw
@@ -856,176 +1074,104 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
 
             logging.info(f"Agent result (first 1000 chars): {result_str[:1000]}")
 
-            # 檢查是否有 tasks_output 或其他包含工具輸出的屬性
-            tasks_output_str = ""
-            if hasattr(result, "tasks_output"):
-                tasks_output_str = str(result.tasks_output)
-                print(
-                    f"\nDEBUG: tasks_output (first 500 chars): {tasks_output_str[:500]}\n"
-                )
+            # Check whether a search was triggered (tool may return TRIGGER_SEARCH)
+            import re
 
-            # 也檢查完整的 result 物件（工具輸出可能在其他屬性）
+            # This logic is from your original code, it's robust
+            if hasattr(result, "tasks_output"):
+                _ = str(
+                    result.tasks_output
+                )  # Access for potential side-effects; ignore content
+
             full_result_str = str(result)
             logging.info(
                 f"Full result object (first 1000 chars): {full_result_str[:1000]}"
             )
 
-            # 檢查是否觸發了搜尋（工具可能返回了 TRIGGER_SEARCH）
-            import re
+            # [MODIFIED] Check if agent triggered search (Flow Step 4)
+            # The 'trigger_search_tool' returns a specific JSON
+            # Note: previously matched 'TRIGGER_SEARCH' but the result isn't used; kept logic minimal.
 
-            # 先解析並更新 criteria，再檢查是否完整
-            # 提取 JSON
+            # Parse and update criteria captured from agent output
             json_match = re.search(r"\{.*\}", result_str, re.DOTALL)
+            parsed_result = {}
+            agent_response = result_str  # Fallback
+            extracted_criteria = {}
+            is_complete = False
+
             if json_match:
                 result_str_json = json_match.group(0)
                 try:
                     parsed_result = json.loads(result_str_json)
+                    agent_response = parsed_result.get("response", result_str)
                     extracted_criteria = parsed_result.get("extracted_criteria", {})
+                    is_complete = parsed_result.get("is_complete", False)
 
-                    # 更新會話中的條件
+                    # Update session criteria with extracted values
                     updates = {}
                     for key, value in extracted_criteria.items():
                         if value is not None:
                             updates[key] = value
-
                     if updates:
-                        print(f"\nDEBUG: Updating criteria with: {updates}\n")
+                        logging.info(f"\nDEBUG: Updating criteria with: {updates}\n")
                         memory.update_criteria(session_id, updates)
                 except json.JSONDecodeError:
-                    pass
+                    logging.warning(
+                        f"Could not parse JSON from agent response: {result_str_json}"
+                    )
+                    # agent_response remains the fallback
 
-            # 現在檢查是否所有條件都已收集
+            # Retrieve updated session state
             updated_session = memory.get_session(session_id)
             all_criteria_ready = memory.is_ready_to_search(session_id)
 
-            print(f"\n{'='*60}")
-            print("DEBUG: Checking if search should be triggered...")
-            if updated_session:
-                print(f"DEBUG: Current criteria: {updated_session['criteria']}")
-                print(f"DEBUG: All criteria ready: {all_criteria_ready}")
-                print(f"DEBUG: Session status: {updated_session['status']}")
-            else:
-                print("DEBUG: Session no longer available.")
-            print(f"{'='*60}\n")
-
-            # 如果所有條件都收集完成且還沒搜尋過，自動觸發搜尋
+            # [MODIFIED] Handle automatically triggering search (Flow Steps 4-6)
             if (
                 updated_session
                 and all_criteria_ready
                 and updated_session["status"]
                 not in [
                     "searching",
-                    "completed",
+                    "AWAITING_APPLY_DECISION",
+                    "COMPLETED_NO_APPLY",
+                    "APPLY_APPROVED",
                 ]
             ):
-                logging.info("All criteria collected! Auto-triggering search...")
-                print("\n🎯 ALL CRITERIA COLLECTED! Starting search...\n")
+                logging.info(
+                    "All criteria collected! Queueing background search job..."
+                )
 
-                # 直接使用 memory 中的 criteria
                 search_criteria = updated_session["criteria"]
+                memory.update_status(session_id, "searching")
 
-                try:
-                    logging.info(
-                        f"Triggering housing search with criteria: {search_criteria}"
-                    )
+                # Create job row and launch background worker
+                job_id = _create_job(session_id=session_id, job_type="search")
+                background_tasks.add_task(
+                    _run_search_task, job_id, session_id, search_criteria
+                )
 
-                    # 更新會話狀態為搜尋中
-                    memory.update_status(session_id, "searching")
+                started_msg = "Alright, I’ve gathered all the information. Starting the search for you now! This may take about a minute…"
+                memory.add_message(
+                    session_id,
+                    "assistant",
+                    started_msg,
+                    {"action": "search_started", "job_id": job_id},
+                )
 
-                    # 執行搜尋
-                    search_result = run_main_crew(
-                        "housing_search",
-                        {"criteria": search_criteria},
-                        streamlit_callback=None,
-                    )
-
-                    # 解析搜尋結果
-                    search_result_str = None
-                    if hasattr(search_result, "raw"):
-                        search_result_str = search_result.raw
-                    else:
-                        search_result_str = str(search_result)
-
-                    # 提取 JSON
-                    json_match = re.search(
-                        r"(\[.*\]|\{.*\})", search_result_str, re.DOTALL
-                    )
-                    if json_match:
-                        search_result_str = json_match.group(1)
-
-                    search_listings = json.loads(search_result_str)
-                    if isinstance(search_listings, dict):
-                        search_listings = search_listings.get(
-                            "listings", search_listings.get("results", [])
-                        )
-
-                    # 儲存搜尋結果
-                    memory.save_search_results(session_id, search_listings)
-
-                    agent_response = f"太好了！我已經收集完所有資訊並開始搜尋。找到了 {len(search_listings)} 個符合條件的房源！"
-
-                    memory.add_message(
-                        session_id,
-                        "assistant",
-                        agent_response,
-                        {
-                            "action": "search_completed",
-                            "listings_count": len(search_listings),
-                        },
-                    )
-
-                    updated_session = memory.get_session(session_id)
-                    if updated_session:
-                        return {
-                            "success": True,
-                            "session_id": session_id,
-                            "response": agent_response,
-                            "criteria": updated_session["criteria"],
-                            "is_complete": True,
-                            "status": "completed",
-                            "search_triggered": True,
-                            "listings": search_listings,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    return {
+                return JSONResponse(
+                    status_code=http_status.HTTP_202_ACCEPTED,
+                    content={
                         "success": True,
+                        "status": "SEARCH_STARTED",
                         "session_id": session_id,
-                        "response": agent_response,
-                        "criteria": {},
-                        "is_complete": True,
-                        "status": "completed",
-                        "search_triggered": True,
-                        "listings": search_listings,
+                        "job_id": job_id,
+                        "response": started_msg,
+                        "criteria": updated_session["criteria"],
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                except Exception as e:
-                    logging.error(
-                        f"Failed to execute search after trigger: {e}", exc_info=True
-                    )
+                    },
+                )
 
-            # 正常的對話回覆（還在收集資訊）
-            # 提取 JSON
-            json_match = re.search(r"\{.*\}", result_str, re.DOTALL)
-            if json_match:
-                result_str = json_match.group(0)
-
-            parsed_result = json.loads(result_str)
-
-            # 提取 Agent 回覆和條件
-            agent_response = parsed_result.get("response", result_str)
-            extracted_criteria = parsed_result.get("extracted_criteria", {})
-            is_complete = parsed_result.get("is_complete", False)
-
-            # 更新會話中的條件
-            updates = {}
-            for key, value in extracted_criteria.items():
-                if value is not None:
-                    updates[key] = value
-
-            if updates:
-                memory.update_criteria(session_id, updates)
-
-            # 儲存 Agent 回覆
+            # Standard conversational reply (still collecting criteria)
             memory.add_message(
                 session_id,
                 "assistant",
@@ -1033,7 +1179,7 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
                 {"extracted_criteria": extracted_criteria, "is_complete": is_complete},
             )
 
-            # 獲取更新後的會話狀態
+            # Fetch session after agent reply
             updated_session = memory.get_session(session_id)
 
             if updated_session:
@@ -1042,28 +1188,33 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
                     "session_id": session_id,
                     "response": agent_response,
                     "criteria": updated_session["criteria"],
+                    "extracted_criteria": extracted_criteria,
+                    "search_criteria": updated_session["criteria"],
                     "is_complete": is_complete or memory.is_ready_to_search(session_id),
                     "status": updated_session["status"],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+
+            # Fallback response when session is missing
             return {
                 "success": True,
                 "session_id": session_id,
                 "response": agent_response,
                 "criteria": {},
+                "extracted_criteria": extracted_criteria,
+                "search_criteria": {},
                 "is_complete": is_complete or memory.is_ready_to_search(session_id),
                 "status": "unknown",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
         except json.JSONDecodeError as e:
-            # 如果無法解析 JSON，直接返回文字回覆
+            # If JSON parsing fails, return plain text reply
             logging.warning(f"Failed to parse JSON from agent response: {e}")
             agent_response = result_str if result_str else str(result)
-
             memory.add_message(session_id, "assistant", agent_response)
-
             updated_session = memory.get_session(session_id)
+            # (Removed unused local variables 'status' and 'criteria' to satisfy linter.)
 
             if updated_session:
                 return {
@@ -1071,6 +1222,8 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
                     "session_id": session_id,
                     "response": agent_response,
                     "criteria": updated_session["criteria"],
+                    "extracted_criteria": {},
+                    "search_criteria": updated_session["criteria"],
                     "is_complete": memory.is_ready_to_search(session_id),
                     "status": updated_session["status"],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1080,6 +1233,8 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
                 "session_id": session_id,
                 "response": agent_response,
                 "criteria": {},
+                "extracted_criteria": {},
+                "search_criteria": {},
                 "is_complete": memory.is_ready_to_search(session_id),
                 "status": "unknown",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1096,10 +1251,8 @@ def agent_housing_chat(session_id: Optional[str] = None, message: str = ""):
 
 @app.get("/agent/housing/sessions")
 def list_conversation_sessions(limit: int = 10):
-    """列出所有對話會話"""
+    """List all conversation sessions"""
     try:
-        from src.memory import ConversationMemory
-
         memory = ConversationMemory()
         sessions = memory.list_sessions(limit=limit)
 
@@ -1121,10 +1274,8 @@ def list_conversation_sessions(limit: int = 10):
 
 @app.get("/agent/housing/session/{session_id}")
 def get_conversation_session(session_id: str):
-    """獲取特定會話的詳細資訊"""
+    """Get details of a specific conversation session"""
     try:
-        from src.memory import ConversationMemory
-
         memory = ConversationMemory()
         session = memory.get_session(session_id)
 
@@ -1151,7 +1302,6 @@ def get_conversation_session(session_id: str):
 
 
 # ---------- Geocoding endpoints ----------
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 
 class GeocodeRequest(BaseModel):
@@ -1272,5 +1422,53 @@ async def serve_thumbnail(listing_id: str):
         media_type="image/webp",
         headers={
             "Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+        },
+    )
+
+
+# --- [NEW] Endpoint to serve application proof (Flow Step 10) ---
+@app.get("/application/proof/{external_id}")
+async def get_application_proof(external_id: str):
+    """
+    Serve the saved screenshot proof for an applied listing.
+    """
+    screenshot_path = None
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT application_screenshot_path FROM listings WHERE external_id = ?",
+                (external_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                screenshot_path = row["application_screenshot_path"]
+
+    except Exception as e:
+        logging.error(
+            f"Database error while fetching screenshot path for {external_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if not screenshot_path:
+        raise HTTPException(
+            status_code=404, detail="No application proof found for this listing."
+        )
+
+    # [MODIFIED] Check path assuming API is run from project root
+    # (where 'outputs' directory lives)
+    if not os.path.exists(screenshot_path):
+        logging.error(
+            f"File not found at path: {screenshot_path} (External ID: {external_id})"
+        )
+        raise HTTPException(
+            status_code=404, detail="Application proof file not found on server."
+        )
+
+    return FileResponse(
+        screenshot_path,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, max-age=3600",  # Cache for 1 hour
         },
     )

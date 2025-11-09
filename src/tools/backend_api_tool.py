@@ -9,7 +9,8 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 # Base URL of the property backend API (env BACKEND_BASE_URL overrides).
-BASE_URL = os.getenv("BACKEND_BASE_URL", "http://136.244.109.212:8000")
+# BASE_URL = os.getenv("BACKEND_BASE_URL", "http://136.244.109.212:8000")
+BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000")
 
 
 class ListingsInput(BaseModel):
@@ -22,13 +23,17 @@ class ListingsInput(BaseModel):
     order_by: Literal["price_amount", "area_m2", "first_seen"] | None = Field(
         default="first_seen", description="Sort field"
     )
-    order_dir: Literal["asc", "desc"] | None = Field(default="desc", description="Sort direction")
-    limit: int = Field(default=10, description="Number of results to return")
+    order_dir: Literal["asc", "desc"] | None = Field(
+        default="desc", description="Sort direction"
+    )
+    limit: int = Field(default=5, description="Number of results to return")
 
 
 class BackendApiTool(BaseTool):
     name: str = "backend_api_tool"
-    description: str = "Queries the backend API to get a list of rental listings based on criteria."
+    description: str = (
+        "Queries the backend API to get a list of rental listings based on criteria."
+    )
     args_schema: type[BaseModel] = ListingsInput
 
     def _run(
@@ -40,7 +45,7 @@ class BackendApiTool(BaseTool):
         q: str | None = None,
         order_by: str = "first_seen",
         order_dir: str = "desc",
-        limit: int = 10,
+        limit: int = 5,
     ) -> str:
 
         # Build query parameter dict
@@ -48,7 +53,8 @@ class BackendApiTool(BaseTool):
             "city": city,
             "max_price": max_price,
             "min_price": min_price,
-            "area_m2_min": min_size,  # Assumes backend expects 'area_m2_min' for minimum size
+            # Backend expects 'min_area' for minimum size
+            "min_area": min_size,
             "q": q,
             "order_by": order_by,
             "order_dir": order_dir,
@@ -90,7 +96,8 @@ class BackendApiTool(BaseTool):
                 time.sleep(1.0 * (i + 1))
 
         return (
-            "An error occurred while calling the backend API: " f"{last_error or 'unknown error'}"
+            "An error occurred while calling the backend API: "
+            f"{last_error or 'unknown error'}"
         )
 
 

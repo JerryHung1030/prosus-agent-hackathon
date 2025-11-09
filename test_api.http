@@ -1,0 +1,300 @@
+###
+# ------------------------------------------------------------------
+# HomePilot Project: Full User Journey Test (Async)
+# ------------------------------------------------------------------
+#
+# INSTRUCTIONS:
+# 1. Install the "REST Client" extension in VS Code (by humao.rest-client).
+# 2. Make sure your backend server is running (`uvicorn backend.api:app --reload ...`).
+# 3. Click "Send Request" above each step *in order*.
+# 4. For polling steps (e.g., 4a, 4b), you must wait and re-run the
+#    *same request* until the "status" changes from "running" to "finished".
+#
+# ------------------------------------------------------------------
+
+###
+# --- VARIABLES ---
+# (These are updated automatically by the REST Client as you run requests)
+###
+
+# The base URL for your local API
+@baseUrl = http://localhost:8000
+
+# Captured from Step 2a
+@sessionId = {{startChat.response.body.session_id}}
+
+# Captured from Step 2d (The Search Job)
+@searchJobId = {{triggerSearch.response.body.job_id}}
+
+# Captured from Step 3b (The Top Listing)
+@listingToApply = {{getSearchResults.response.body.result.listings[0]}}
+@listingExternalId = {{@listingToApply.external_id}}
+
+# Captured from Step 4a (The Apply Job)
+@applyJobId = {{triggerApply.response.body.job_id}}
+
+###
+# ------------------------------------------------------------------
+# STEP 2: User Chat Flow (Flow Steps 1-4)
+# The user (frontend) talks to the chatbot to provide the 4 criteria.
+# ------------------------------------------------------------------
+
+### 2a. Start Chat (User says hi)
+# The API creates a new session_id.
+# @name startChat
+POST {{baseUrl}}/agent/housing/chat
+Content-Type: application/json
+
+{
+    "message": "Hi, I need help finding a place."
+}
+
+### 2b. Provide Criterion 1 (City)
+POST {{baseUrl}}/agent/housing/chat
+Content-Type: application/json
+
+{
+    "session_id": "{{sessionId}}",
+    "message": "I want to live in Eindhoven."
+}
+
+### 2c. Provide Criteria 2 & 3 (Price & Size)
+POST {{baseUrl}}/agent/housing/chat
+Content-Type: application/json
+
+{
+    "session_id": "{{sessionId}}",
+    "message": "My max budget is 1800 euros, and I need at least 60 square meters."
+}
+
+### 2d. Provide Criterion 4 -> Triggers Async Search
+# The API detects all 4 criteria are met and starts a background job.
+#
+# !! EXPECTED RESPONSE: 202 Accepted !!
+# The body will contain "status": "SEARCH_STARTED" and the "job_id".
+#
+# @name triggerSearch
+POST {{baseUrl}}/agent/housing/chat
+Content-Type: application/json
+
+{
+    "session_id": "{{sessionId}}",
+    "message": "I need to commute to 'Groene Loper 3, 5612 AE Eindhoven'."
+}
+
+###
+# ------------------------------------------------------------------
+# STEP 3: Poll for Search Results (Flow Steps 5-6)
+# The frontend now polls the jobs API to wait for the Top 5 results.
+# ------------------------------------------------------------------
+
+### 3a. Poll Job Status (Run this immediately)
+# The "status" will be "running".
+GET {{baseUrl}}/jobs/status/{{searchJobId}}
+Accept: application/json
+
+### 3b. Poll Job Status (Wait ~30-60 seconds)
+# !! Re-run this *same request* until "status" is "finished" !!
+#
+# The "result" field will now contain the Top 5 "listings" array.
+# The frontend can now update the map.
+#
+# @name getSearchResults
+GET {{baseUrl}}/jobs/status/{{searchJobId}}
+Accept: application/json
+
+###
+# ------------------------------------------------------------------
+# STEP 4: User Decides to Apply (Flow Steps 7-8)
+# The frontend shows the Top 5. The agent asks if the user wants to apply.
+# The user says yes, then clicks the "Apply" button on a listing.
+# ------------------------------------------------------------------
+
+### 4a. User confirms "Yes, I want to apply"
+# The API (Chatbot) responds, "Great! Click 'Apply' on any listing..."
+POST {{baseUrl}}/agent/housing/chat
+Content-Type: application/json
+
+{
+    "session_id": "{{sessionId}}",
+    "message": "Yes, please apply for me."
+}
+
+### 4b. User Clicks "Apply" -> Triggers Async Apply
+# The frontend sends the user's profile and the chosen listing's data.
+#
+# !! EXPECTED RESPONSE: 202 Accepted !!
+# The body will contain "status": "APPLY_STARTED" and a *new* "job_id".
+#
+# @name triggerApply
+POST {{baseUrl}}/agent/housing/apply
+Content-Type: application/json
+
+{
+    "user_profile": {
+        "username": "your-pararius-email@gmail.com",
+        "password": "your-pararius-password",
+        "salutation": "0",
+        "employment_status": "3",
+        "gross_income": "[1000,1500]",
+        "guarantor": "3",
+        "living_situation": "1",
+        "has_pets": false,
+        "start_date": "2025-12-01",
+        "rental_duration": "5",
+        "current_situation": "i_dont_rent_or_own_a_roof_yet",
+        "full_name": "Hackathon User",
+        "email": "your-pararius-email@gmail.com",
+        "phone": "+31612345678"
+    },
+    "listing_details": {{@listingToApply}}
+}
+
+###
+# ------------------------------------------------------------------
+# STEP 5: Poll for Apply Results (Flow Steps 9-10)
+# The frontend shows a spinner on the Listing card and polls the new job.
+# ------------------------------------------------------------------
+
+### 5a. Poll Apply Job Status (Run this immediately)
+# The "status" will be "running".
+GET {{baseUrl}}/jobs/status/{{applyJobId}}
+Accept: application/json
+
+### 5b. Poll Apply Job Status (Wait ~30-40 seconds)
+# !! Re-run this *same request* until "status" is "finished" !!
+#
+# The "result" field will now contain the "screenshot_path".
+# The frontend can now turn the map icon green.
+#
+# @name getApplyResult
+GET {{baseUrl}}/jobs/status/{{applyJobId}}
+Accept: application/json
+
+###
+# ------------------------------------------------------------------
+# STEP 6: Verification (Flow Step 11)
+# The frontend verifies the apply status and fetches the proof
+# to show in the listing's image carousel.
+# ------------------------------------------------------------------
+
+### 6a. Verify Listing Status in DB
+# Check that "application_status" is now "applied"
+# and "application_screenshot_path" is filled.
+GET {{baseUrl}}/listing/{{listingExternalId}}
+Accept: application/json
+
+### 6b. Download Screenshot Proof
+# The frontend uses this URL to display the 2nd image.
+GET {{baseUrl}}/application/proof/{{listingExternalId}}
+Accept: image/png
+
+###
+# ------------------------------------------------------------------
+# 7. (Optional) Check Final Session State
+# ------------------------------------------------------------------
+
+### 7a. Get final conversation session
+GET {{baseUrl}}/agent/housing/session/{{sessionId}}
+Accept: application/json
+
+### 7b. List all sessions
+GET {{baseUrl}}/agent/housing/sessions?limit=5
+Accept: application/json
+
+###
+# ------------------------------------------------------------------
+# 8. Admin & Utility Endpoints (Complete API Coverage)
+# ------------------------------------------------------------------
+
+### 8a. Ingest Listings (Sample minimal payload)
+POST {{baseUrl}}/ingest-listings
+Content-Type: application/json
+
+[
+    {
+        "id": "pararius-999001",
+        "url": "https://www.pararius.com/apartment-for-rent/example-999001",
+        "title": "Cozy 1BR near city center",
+        "price": { "amount": 1450, "frequency": "monthly", "service_costs": 50 },
+        "area_m2": 48,
+        "address": {"street": "Samplestraat 1", "postal_code": "1011AA", "city": "Amsterdam"},
+        "housing_type": "apartment",
+        "furnishes": "furnished",
+        "first_seen": "2025-11-01T10:00:00Z",
+        "pets_allowed": false,
+        "scrape_meta": {"scraper_version": "demo-1"},
+        "thumbnail_path": "images/pararius-999001/thumbnail.webp"
+    }
+]
+
+### 8b. List Listings (Default)
+GET {{baseUrl}}/listings?limit=5&order_by=first_seen&order_dir=desc
+Accept: application/json
+
+### 8c. List Listings (City filter)
+GET {{baseUrl}}/listings?city=Amsterdam&limit=5
+Accept: application/json
+
+### 8d. List Listings (Geo radius filter)
+# Amsterdam Central approx coords
+GET {{baseUrl}}/listings?lat=52.3791&lng=4.9003&radius_km=5&limit=5&order_by=distance
+Accept: application/json
+
+### 8e. Get Single Listing by ID or external_id
+# Replace ID below if needed; using @listingExternalId captured earlier works too
+GET {{baseUrl}}/listing/{{listingExternalId}}
+Accept: application/json
+
+### 8f. Synchronous Agent Search (Direct)
+POST {{baseUrl}}/agent/housing/search
+Content-Type: application/json
+
+{
+    "city": "Eindhoven",
+    "max_price": 1800,
+    "min_size": 60,
+    "commute_target": "Groene Loper 3, 5612 AE Eindhoven"
+}
+
+### 8g. Manual LLM Job: Start
+# @name manualLlmStart
+POST {{baseUrl}}/llm/start
+Content-Type: application/json
+
+{
+    "status": "running"
+}
+
+@manualJobId = {{manualLlmStart.response.body.job_id}}
+
+### 8h. Manual LLM Job: Finish
+POST {{baseUrl}}/llm/finish
+Content-Type: application/json
+
+{
+    "job_id": {{manualJobId}},
+    "status": "finished",
+    "result": {"message": "Manual job completed"}
+}
+
+### 8i. Manual LLM Job: Status (recent)
+GET {{baseUrl}}/llm/status?limit=5
+Accept: application/json
+
+### 8j. Jobs: Status (by id)
+GET {{baseUrl}}/jobs/status/{{manualJobId}}
+Accept: application/json
+
+### 8k. Geocode Address (with cache)
+POST {{baseUrl}}/geocode
+Content-Type: application/json
+
+{
+    "address": "Amsterdam Central Station, Netherlands"
+}
+
+### 8l. Images: Thumbnail (may 404 if file doesn't exist)
+# Replace LISTING_ID with an existing internal id or external id folder structure if present
+GET {{baseUrl}}/images/{{listingExternalId}}/thumbnail.webp
+Accept: image/webp

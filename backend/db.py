@@ -2,11 +2,16 @@
 import os
 import sqlite3
 
-DB_PATH = os.getenv("DB_PATH", "/data/housing.db")
+# Default to a project-local path to avoid permission issues like '/data/...'
+DB_PATH = os.getenv("DB_PATH", "./.data/housing.db")
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    # Ensure parent directory exists before opening the SQLite file
+    db_abs_path = os.path.abspath(DB_PATH)
+    os.makedirs(os.path.dirname(db_abs_path), exist_ok=True)
+
+    conn = sqlite3.connect(db_abs_path)
     conn.row_factory = sqlite3.Row
     # more stable for concurrent read/write
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -49,7 +54,9 @@ def init_db():
             longitude REAL,
             raw_json TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            application_status TEXT DEFAULT 'none', -- 'none', 'pending', 'applied'
+            application_screenshot_path TEXT         -- e.g., 'outputs/submission_proof_xxx.png'
         )
         """
         )
@@ -74,15 +81,29 @@ def init_db():
         """
         )
 
+        # [MODIFIED] Enhance llm_jobs table for asynchronous flow
         cur.execute(
             """
         CREATE TABLE IF NOT EXISTS llm_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            status TEXT NOT NULL,            
+
+            -- [NEW] Link to conversation session
+            session_id TEXT,
+
+            -- [NEW] What kind of job is this? 'search' or 'apply'
+            job_type TEXT,
+
+            status TEXT NOT NULL,            -- 'running', 'finished', 'error'
             start_time TEXT NOT NULL,
-            result TEXT,                    
+            result TEXT,                     -- Store JSON result or error
             end_time TEXT                    
         )
+        """
+        )
+        # [NEW] Index for faster job lookup by session
+        cur.execute(
+            """
+        CREATE INDEX IF NOT EXISTS idx_llm_jobs_session ON llm_jobs(session_id)
         """
         )
 

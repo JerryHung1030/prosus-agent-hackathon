@@ -86,7 +86,12 @@ class ConversationMemory:
             "created_at": now,
             "updated_at": now,
             "messages": [],
-            "criteria": {"city": None, "max_price": None, "min_size": None, "commute_target": None},
+            "criteria": {
+                "city": None,
+                "max_price": None,
+                "min_size": None,
+                "commute_target": None,
+            },
             "status": "collecting",  # collecting, ready, searching, completed
             "search_results": None,
         }
@@ -105,7 +110,9 @@ class ConversationMemory:
         """
         return self.sessions.get(session_id)
 
-    def add_message(self, session_id: str, role: str, content: str, metadata: dict | None = None):
+    def add_message(
+        self, session_id: str, role: str, content: str, metadata: dict | None = None
+    ):
         """Append a message to the session.
 
         Args:
@@ -223,7 +230,7 @@ class ConversationMemory:
         criteria = self.sessions[session_id]["criteria"]
         return all(criteria.values())
 
-    def list_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
+    def list_sessions(self, limit: int = 5) -> list[dict[str, Any]]:
         """List all sessions (most recent first).
 
         Args:
@@ -232,7 +239,9 @@ class ConversationMemory:
         Returns:
             List of session dicts.
         """
-        sessions = sorted(self.sessions.values(), key=lambda x: x["updated_at"], reverse=True)
+        sessions = sorted(
+            self.sessions.values(), key=lambda x: x["updated_at"], reverse=True
+        )
         return sessions[:limit]
 
     def delete_session(self, session_id: str):
@@ -251,7 +260,9 @@ class ConversationMemory:
             except Exception as e:
                 print(f"Error: Failed to delete session file {session_id}: {e}")
 
-    def format_conversation_history(self, session_id: str, limit: int | None = None) -> str:
+    def format_conversation_history(
+        self, session_id: str, limit: int | None = None
+    ) -> str:
         """Format conversation history as plain text.
 
         Args:

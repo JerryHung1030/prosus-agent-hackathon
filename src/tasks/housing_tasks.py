@@ -28,10 +28,11 @@ class RankedListingsOutput(RootModel[list[RankedListingItem]]):
 
 def create_housing_search_task(agent, criteria: dict[str, Any]):
     """Task: Fetch raw listings from backend."""
+    # Standardize keys to align with conversation & tools
     query_summary = {
         "city": criteria.get("city"),
-        "max_price": criteria.get("price"),
-        "min_size": criteria.get("size"),
+        "max_price": criteria.get("max_price"),
+        "min_size": criteria.get("min_size"),
     }
     return Task(
         description=(
@@ -48,7 +49,14 @@ def create_housing_search_task(agent, criteria: dict[str, Any]):
 def create_housing_rank_task(agent, criteria: dict[str, Any]):
     """Task: Rank listings with commute times."""
     commute_target = criteria.get("commute_target")
-    criteria_json = json.dumps(criteria)
+    # Normalize keys for ranking tool (ensure max_price/min_size present)
+    normalized = {
+        "city": criteria.get("city"),
+        "max_price": criteria.get("max_price"),
+        "min_size": criteria.get("min_size"),
+        "commute_target": commute_target,
+    }
+    criteria_json = json.dumps(normalized)
 
     # --- 3. Important: optimized task description ---
     # Explicitly instruct the Agent to use the batch tool for speed.
@@ -73,7 +81,7 @@ def create_housing_rank_task(agent, criteria: dict[str, Any]):
         ),
         agent=agent,
         # 4. Important: update tools for this task
-        tools=[batch_commute_tool, listing_ranker_tool],
+    tools=[batch_commute_tool, listing_ranker_tool],
         output_json=RankedListingsOutput,
     )
 

@@ -11,7 +11,9 @@ class RankingInput(BaseModel):
     criteria: dict[str, Any] = Field(
         description="User's search criteria (price, size, commute_target)."
     )
-    listings: list[dict[str, Any]] = Field(description="List of listings from RAG search.")
+    listings: list[dict[str, Any]] = Field(
+        description="List of listings from RAG search."
+    )
     commute_times: list[str] = Field(
         description="List of commute times (as strings, e.g., '25 mins') from the Web Search tool."
     )
@@ -34,7 +36,8 @@ class ListingRankerTool(BaseTool):
         price_score = 0.0
         try:
             list_price = float(listing.get("price") or listing.get("price_amount") or 0)
-            user_price = float(criteria.get("price", 0))
+            # Standardize on 'max_price' in criteria
+            user_price = float(criteria.get("max_price", 0))
             if user_price > 0:
                 # 價格越低越好。如果價格是 0，得 100 分。
                 # 如果價格等於 user_price * 1.5，得 0 分。
@@ -50,7 +53,8 @@ class ListingRankerTool(BaseTool):
         size_score = 0.0
         try:
             list_size = float(listing.get("size_m2") or listing.get("area_m2") or 0)
-            user_size = float(criteria.get("size", 0))
+            # Standardize on 'min_size' in criteria
+            user_size = float(criteria.get("min_size", 0))
             if user_size > 0:
                 # 面積越大越好。如果面積是 user_size * 1.5 (或更大)，得 100 分。
                 # 如果面積是 0，得 0 分。
@@ -85,7 +89,10 @@ class ListingRankerTool(BaseTool):
         return round(final_score, 2)
 
     def _run(
-        self, criteria: dict[str, Any], listings: list[dict[str, Any]], commute_times: list[str]
+        self,
+        criteria: dict[str, Any],
+        listings: list[dict[str, Any]],
+        commute_times: list[str],
     ) -> list[dict[str, Any]]:
 
         if len(listings) != len(commute_times):
@@ -109,9 +116,11 @@ class ListingRankerTool(BaseTool):
             scored_listings.append(listing_copy)
 
         # Sort by score descending
-        sorted_listings = sorted(scored_listings, key=lambda x: x["match_score"], reverse=True)
-
-        return sorted_listings[:5]  # Return Top 5
+        sorted_listings = sorted(
+            scored_listings, key=lambda x: x["match_score"], reverse=True
+        )
+        # Return Top 5 to match task description (if fewer than 5, return all)
+        return sorted_listings[:5]
 
 
 # Export an instance
