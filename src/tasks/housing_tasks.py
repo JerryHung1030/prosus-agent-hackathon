@@ -47,7 +47,7 @@ def create_housing_search_task(agent, criteria: dict[str, Any]):
 
 
 def create_housing_rank_task(agent, criteria: dict[str, Any]):
-    """Task: Rank listings with commute times."""
+    """Task: Rank listings with commute times, with optimization for small result sets."""
     commute_target = criteria.get("commute_target")
     # Normalize keys for ranking tool (ensure max_price/min_size present)
     normalized = {
@@ -60,9 +60,15 @@ def create_housing_rank_task(agent, criteria: dict[str, Any]):
 
     # --- 3. Important: optimized task description ---
     # Explicitly instruct the Agent to use the batch tool for speed.
+    # Added optimization: skip ranking for <= 10 listings
     return Task(
         description=(
-            "Rank housing listings. Input is a JSON list from the search task. "
+            "Rank housing listings. Input is a JSON list from the search task.\n\n"
+            "⚡ OPTIMIZATION: Check the number of listings first:\n"
+            "- If there are 10 or fewer listings, assign each listing a 'match_score' of 100 "
+            "and 'commute_time' of 'N/A', then return them immediately WITHOUT calling any tools. "
+            "This skips redundant ranking when we have few results.\n"
+            "- If there are more than 10 listings, proceed with full ranking:\n\n"
             "STEP 1: Call `batch_commute_tool` ONCE. "
             f"You MUST pass the full `listings` list and the `destination`='{commute_target}'. "
             "This tool will return a list of commute time strings.\n\n"
@@ -70,18 +76,20 @@ def create_housing_rank_task(agent, criteria: dict[str, Any]):
             "You MUST pass the 'listings' list, the 'commute_times' list (from Step 1), "
             f"and the 'criteria' dictionary: {criteria_json}.\n\n"
             "!!Most Important!! OUTPUT RULE: "
-            "Return the FULL, UNMODIFIED JSON list of ranked listings (Top 5) "
-            "exactly as you received it from the listing_ranker_tool. "
+            "Return the FULL, UNMODIFIED JSON list of ranked listings (Top 5 if > 10, all if <= 10) "
+            "exactly as you received it from the listing_ranker_tool or as you prepared it. "
             "Do NOT remove any fields."
         ),
         expected_output=(
-            "The full JSON list of the Top 5 ranked listings, "
-            "including all original fields (id, url, title, etc.) "
+            "The full JSON list of ranked listings: "
+            "- If <= 10 listings: all listings with match_score=100 and commute_time='N/A'\n"
+            "- If > 10 listings: Top 5 ranked listings\n"
+            "All listings must include all original fields (id, url, title, etc.) "
             "plus the new 'match_score' and 'commute_time' fields."
         ),
         agent=agent,
         # 4. Important: update tools for this task
-    tools=[batch_commute_tool, listing_ranker_tool],
+        tools=[batch_commute_tool, listing_ranker_tool],
         output_json=RankedListingsOutput,
     )
 

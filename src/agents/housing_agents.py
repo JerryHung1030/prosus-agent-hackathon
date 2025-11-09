@@ -30,11 +30,16 @@ def create_search_agent(step_callback=None) -> Agent:
 def create_ranking_agent(step_callback=None) -> Agent:
     return Agent(
         role="Commute & Data Analyst",
-        goal="Analyze listings, find REAL commute times, and rank the top 5.",
+        goal="Analyze listings efficiently and rank them based on commute and criteria.",
         backstory=(
-            "You are a data analyst. Your job is to take a list of properties, "
-            "use the BATCH commute tool to find real commute data for all of them, "
-            "and then use a ranking tool to score and sort them."
+            "You are an efficient data analyst. Your job is to take a list of properties "
+            "and rank them intelligently:\n"
+            "- If there are 10 or fewer listings, you skip the ranking process entirely "
+            "and assign all listings a score of 100 with commute_time='N/A' to save time.\n"
+            "- If there are more than 10 listings, you use the BATCH commute tool to find "
+            "real commute data for all of them, and then use the ranking tool to score and "
+            "sort them, returning the top 5.\n"
+            "You optimize for efficiency and avoid unnecessary computation."
         ),
         tools=[batch_commute_tool, listing_ranker_tool],
         allow_delegation=False,
