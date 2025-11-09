@@ -132,8 +132,8 @@ Content-Type: application/json
 
 {
     "user_profile": {
-        "username": "your-pararius-email@gmail.com",
-        "password": "your-pararius-password",
+        "username": "chiehlee.hung@gmail.com",
+        "password": "Systemadmin!@3",
         "salutation": "0",
         "employment_status": "3",
         "gross_income": "[1000,1500]",
@@ -144,7 +144,7 @@ Content-Type: application/json
         "rental_duration": "5",
         "current_situation": "i_dont_rent_or_own_a_roof_yet",
         "full_name": "Hackathon User",
-        "email": "your-pararius-email@gmail.com",
+        "email": "jerryhung1100@gmail.com",
         "phone": "+31612345678"
     },
     "listing_details": {{@listingToApply}}
