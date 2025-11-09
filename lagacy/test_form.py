@@ -17,7 +17,7 @@ def run_test():
     # --- !! YOUR HARD-CODED LOGIN !! ---
     # Put your real Pararius login credentials here
     test_username = "chiehlee.hung@gmail.com"
-    test_password = "Systemadmin!@3"
+    test_password = "xxx"
     # ------------------------------------
 
     # This is the target URL we want to go to *after* logging in

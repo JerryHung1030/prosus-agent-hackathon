@@ -1,4 +1,13 @@
-# FILE: ./run_full_workflow.py
+# FILE: ./lagacy/run_full_workflow.py
+# ------------------------------------------------------------------
+# (!! 注意 !!)
+# 這個腳本現在已經過時 (lagacy)
+# 它只會測試 "search" 和 "apply" crews。
+#
+# 請改用 "test_full_chain.py"
+# 來測試新的 "conversation -> search -> apply" 完整流程。
+# ------------------------------------------------------------------
+
 import json
 import os
 import re
