@@ -1,25 +1,196 @@
-# VS Code REST Client / HTTP file for manual testing the backend API
-# Usage: Install the "REST Client" extension (humao.rest-client) and click "Send Request" above each request.
+# VS Code REST Client file to test ALL backend APIs
+# How to use: install the REST Client extension (humao.rest-client) and click "Send Request" above each request.
 
-@baseUrl = http://136.244.109.212:8000
-# Override host if deployed:
+@baseUrl = http://localhost:8000
+# If deployed remotely, change to your host, e.g.:
+# @baseUrl = http://136.244.109.212:8000
 
+################################################################################
+# 0) Start the server (run in terminal)
+#   Recommended commands (pick one):
+#   uvicorn backend.api:app --reload --host 0.0.0.0 --port 8000
+#   or
+#   python -m uvicorn backend.api:app --reload --host 0.0.0.0 --port 8000
+################################################################################
+
+################################################################################
+# 1) Ingest: add some test listings (POST /ingest-listings)
+################################################################################
+POST {{baseUrl}}/ingest-listings
+Content-Type: application/json
+Accept: application/json
+
+[
+	{
+		"id": "pararius-001",
+		"url": "https://www.pararius.com/apartment-for-rent/amsterdam/pararius-001",
+		"title": "Cozy studio in Amsterdam",
+		"price": { "amount": 1450, "frequency": "monthly" },
+		"area_m2": 28,
+		"address": { "street": "Damrak 1", "postal_code": "1012LG", "city": "Amsterdam" },
+		"housing_type": "apartment",
+		"furnishes": "furnished",
+		"first_seen": "2025-01-01T10:00:00+00:00",
+		"pets_allowed": false,
+		"thumbnail_path": null
+	},
+	{
+		"id": "pararius-002",
+		"url": "https://www.pararius.com/apartment-for-rent/rotterdam/pararius-002",
+		"title": "Nice 1BR near central",
+		"price": { "amount": 1200, "frequency": "monthly" },
+		"area_m2": 40,
+		"address": { "street": "Stationsplein 1", "postal_code": "3013AJ", "city": "Rotterdam" },
+		"housing_type": "apartment",
+		"furnishes": "unfurnished",
+		"first_seen": "2025-01-05T10:00:00+00:00",
+		"pets_allowed": true,
+		"thumbnail_path": null
+	}
+]
+
+################################################################################
+# 2) Listings: basic queries (GET /listings)
+################################################################################
 ### Basic listings query
-GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&limit=20
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=2000&min_area=20&limit=20
 Accept: application/json
 
 ### With explicit min_price
-GET {{baseUrl}}/listings?city=Amsterdam&min_price=800&max_price=1500&min_size=20&limit=20
+GET {{baseUrl}}/listings?city=Amsterdam&min_price=800&max_price=2000&min_area=20&limit=20
 Accept: application/json
 
-### With keyword query `q` (optional, backend may ignore empty string)
-GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&q=&limit=20
+### With keyword query `q` (optional)
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=2000&min_area=20&q=cozy&limit=20
 Accept: application/json
 
 ### Sort by area (descending)
-GET {{baseUrl}}/listings?city=Amsterdam&max_price=1500&min_size=20&order_by=area_m2&order_dir=desc&limit=20
+GET {{baseUrl}}/listings?city=Amsterdam&max_price=2000&min_area=20&order_by=area_m2&order_dir=desc&limit=20
 Accept: application/json
 
-### Health or root (optional, depends on backend implementation)
-# GET {{baseUrl}}/health
-# Accept: application/json
+### Geo filter + distance order (may be empty depending on geocoded coords)
+GET {{baseUrl}}/listings?lat=52.378&lng=4.9&radius_km=5&order_by=distance&limit=20
+Accept: application/json
+
+### Filter by pets_allowed
+GET {{baseUrl}}/listings?city=Amsterdam&pets_allowed=true&limit=20
+Accept: application/json
+
+### Include raw_json in response
+GET {{baseUrl}}/listings?city=Amsterdam&include_raw=true&limit=5
+Accept: application/json
+
+### Since a specific ISO datetime
+GET {{baseUrl}}/listings?since=2025-01-01T00:00:00Z&limit=10
+Accept: application/json
+
+################################################################################
+# 3) Listing detail: by external_id or internal id (GET /listing/{listing_id})
+################################################################################
+GET {{baseUrl}}/listing/pararius-001
+Accept: application/json
+
+################################################################################
+# 4) LLM Jobs: start / finish / status (POST /llm/start, /llm/finish; GET /llm/status)
+################################################################################
+### Start a job
+POST {{baseUrl}}/llm/start
+Content-Type: application/json
+Accept: application/json
+
+{
+	"status": "running"
+}
+
+### Finish a job (replace job_id with the one returned above)
+POST {{baseUrl}}/llm/finish
+Content-Type: application/json
+Accept: application/json
+
+{
+	"job_id": 1,
+	"status": "finished",
+	"result": { "text": "Done", "image_path": null }
+}
+
+### Query recent jobs
+GET {{baseUrl}}/llm/status?limit=10
+Accept: application/json
+
+################################################################################
+# 5) Agent: housing search (POST /agent/housing/search)
+################################################################################
+POST {{baseUrl}}/agent/housing/search
+Content-Type: application/json
+Accept: application/json
+
+{
+	"city": "Amsterdam",
+	"max_price": 2000,
+	"min_size": 25,
+	"commute_target": "Amsterdam Central Station"
+}
+
+################################################################################
+# 6) Agent: one-click apply (POST /agent/housing/apply)
+################################################################################
+POST {{baseUrl}}/agent/housing/apply
+Content-Type: application/json
+Accept: application/json
+
+{
+	"user_profile": {
+		"name": "John Doe",
+		"email": "john@example.com",
+		"phone": "+31-612345678",
+		"intro": "Software engineer relocating to NL"
+	},
+	"listing_details": {
+		"title": "Cozy studio in Amsterdam",
+		"url": "https://www.pararius.com/apartment-for-rent/amsterdam/pararius-001",
+		"city": "Amsterdam",
+		"price": 1450,
+		"area_m2": 28
+	}
+}
+
+################################################################################
+# 7) Agent: conversational search (POST /agent/housing/chat)
+#   First request without session_id; copy session_id from the response and paste into the variable below for step 2.
+################################################################################
+### Step 1: greeting (no session_id)
+POST {{baseUrl}}/agent/housing/chat?message=Hi, I want an apartment in Amsterdam with a budget of 1800 EUR, at least 25 sqm, commuting to Amsterdam Central Station
+Accept: application/json
+
+### Step 2: continue conversation (paste session_id into the variable below)
+@sessionId = REPLACE_WITH_SESSION_ID
+POST {{baseUrl}}/agent/housing/chat?session_id={{sessionId}}&message=Can you confirm whether pets are allowed?
+Accept: application/json
+
+### List recent sessions
+GET {{baseUrl}}/agent/housing/sessions?limit=10
+Accept: application/json
+
+### Get single session (paste session_id)
+GET {{baseUrl}}/agent/housing/session/{{sessionId}}
+Accept: application/json
+
+################################################################################
+# 8) Geocode: get coordinates for an address (POST /geocode)
+#   Requires GOOGLE_MAPS_API_KEY in env; without a valid key the API may return 502/404.
+################################################################################
+POST {{baseUrl}}/geocode
+Content-Type: application/json
+Accept: application/json
+
+{
+	"address": "Damrak 1, 1012LG, Amsterdam, Netherlands"
+}
+
+################################################################################
+# 9) Images: get thumbnail (GET /images/{listing_id}/thumbnail.webp)
+#   Requires a local file at images/{listing_id}/thumbnail.webp; otherwise returns 404.
+################################################################################
+GET {{baseUrl}}/images/pararius-001/thumbnail.webp
+Accept: image/webp
+

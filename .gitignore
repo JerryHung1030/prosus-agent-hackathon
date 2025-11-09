@@ -1,6 +1,7 @@
 # Environment
 .env
 venv/
+.venv/
 *.pyc
 __pycache__/
 
@@ -11,6 +12,8 @@ db/
 # data/
 *.csv
 *.json
+!frontend/package-lock.json
+!frontend/package.json
 
 # OS
 .DS_Store
@@ -19,5 +22,11 @@ all_code.txt
 cmd.txt
 informations/
 .ruff_cache/
+images/
+# housing.db stuff
+backend/data/housing.db
+backend/data/housing.db-shm
+backend/data/housing.db-wal
 
-outputs/
+# remove node modules if any
+node_modules/

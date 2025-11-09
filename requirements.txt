@@ -236,7 +236,8 @@ soupsieve==2.8
 SQLAlchemy==2.0.44
 sse-starlette==3.0.3
 stack-data==0.6.3
-starlette==0.50.0
+starlette==0.41.2
+fastapi==0.115.4
 streamlit==1.51.0
 sympy==1.14.0
 tavily-python==0.7.12

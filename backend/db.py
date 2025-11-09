@@ -1,8 +1,9 @@
 # db.py
+import os
 import sqlite3
-from pathlib import Path
 
-DB_PATH = Path("housing.db")
+DB_PATH = os.getenv("DB_PATH", "/data/housing.db")
+
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -12,11 +13,13 @@ def get_connection():
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
+
 def init_db():
     with get_connection() as conn:
         cur = conn.cursor()
         # listings: flatten the fields that need to be queried, the rest is stored in raw_json
-        cur.execute("""
+        cur.execute(
+            """
         CREATE TABLE IF NOT EXISTS listings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             external_id TEXT UNIQUE NOT NULL,
@@ -37,16 +40,42 @@ def init_db():
             contract_duration_months INTEGER,
             agency_name TEXT,
             agency_email TEXT,
+            agency_contact_url TEXT,
             first_seen TEXT,
             pets_allowed INTEGER,
             scraper_version TEXT,
             thumbnail_path TEXT,
+            latitude REAL,
+            longitude REAL,
             raw_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """)
-        cur.execute("""
+        """
+        )
+
+        # Create geo index for faster radius queries
+        cur.execute(
+            """
+        CREATE INDEX IF NOT EXISTS idx_listings_geo ON listings(latitude, longitude)
+        """
+        )
+
+        # Address geocoding cache to prevent redundant API calls
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS address_cache (
+            address_hash TEXT PRIMARY KEY,
+            address TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+        )
+
+        cur.execute(
+            """
         CREATE TABLE IF NOT EXISTS llm_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             status TEXT NOT NULL,            
@@ -54,7 +83,8 @@ def init_db():
             result TEXT,                    
             end_time TEXT                    
         )
-        """)
+        """
+        )
 
         conn.commit()
     print("Database initialized.")
