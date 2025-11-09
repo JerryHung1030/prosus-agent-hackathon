@@ -14,8 +14,12 @@ RUN apt-get update \
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY backend/ /app/
+# Copy backend as a proper Python package under /app/backend
+COPY backend/ /app/backend/
+# Also copy the agent src package so imports like `from src.main import ...` work
+COPY src/ /app/src/
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the app using the package module path so relative imports resolve
+CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]

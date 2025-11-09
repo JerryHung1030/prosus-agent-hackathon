@@ -86,20 +86,25 @@ def init_db():
             """
         CREATE TABLE IF NOT EXISTS llm_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            -- [NEW] Link to conversation session
-            session_id TEXT,
-
-            -- [NEW] What kind of job is this? 'search' or 'apply'
-            job_type TEXT,
-
             status TEXT NOT NULL,            -- 'running', 'finished', 'error'
-            start_time TEXT NOT NULL,
-            result TEXT,                     -- Store JSON result or error
-            end_time TEXT                    
+            start_time TEXT NOT NULL
         )
         """
         )
+
+        # Perform lightweight migrations to add new columns if they don't exist
+        cur.execute("PRAGMA table_info(llm_jobs)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        migrations: list[tuple[str, str]] = [
+            ("session_id", "TEXT"),
+            ("job_type", "TEXT"),
+            ("result", "TEXT"),
+            ("end_time", "TEXT"),
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in existing_cols:
+                cur.execute(f"ALTER TABLE llm_jobs ADD COLUMN {col_name} {col_type}")
+
         # [NEW] Index for faster job lookup by session
         cur.execute(
             """

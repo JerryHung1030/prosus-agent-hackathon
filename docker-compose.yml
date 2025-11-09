@@ -6,9 +6,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
+      - ./backend:/app/backend
+      - ./src:/app/src
       - ./backend/data:/data
       - ./images:/app/images
+    env_file:
+      - .env
     environment:
       PYTHONUNBUFFERED: "1"
       DB_PATH: /data/housing.db

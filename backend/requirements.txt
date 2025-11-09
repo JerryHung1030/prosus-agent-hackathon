@@ -5,3 +5,11 @@ numpy
 python-jose[cryptography]
 python-multipart
 httpx
+
+# Agent dependencies (for src/*)
+crewai==1.3.0
+crewai-tools==1.3.0
+openai>=1.0.0
+langchain-openai>=0.1.0
+tiktoken>=0.5.0
+tavily-python>=0.7.0

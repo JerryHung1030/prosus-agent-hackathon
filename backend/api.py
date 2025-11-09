@@ -19,15 +19,82 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, EmailStr, Field
 
-from .db import (
-    get_connection,
-    init_db,
-)
+try:
+    # Prefer absolute import when package context is available
+    from backend.db import get_connection, init_db  # type: ignore
+except ImportError:
+    # Fallback to relative import when executed directly (e.g., local scripts)
+    from .db import get_connection, init_db  # type: ignore
+
+###############################
+# Environment / Path Setup    #
+###############################
+# Load .env early so OPENAI_API_KEY and others are available before agent availability check
+load_dotenv()
 
 # Import agent runner from sibling src/ package (path adjustment then import)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.main import run_main_crew
-from src.memory import ConversationMemory  # [MODIFIED] Import ConversationMemory
+SRC_PATH = os.path.join(os.path.dirname(__file__), "..", "src")
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
+
+# Always try to use the real ConversationMemory from src (safe to import without OPENAI_API_KEY)
+try:
+    from src.memory import ConversationMemory  # type: ignore
+except Exception as mem_exc:
+    logging.warning(
+        "ConversationMemory import failed (%s); using in-process fallback.", mem_exc
+    )
+    class ConversationMemory:  # type: ignore
+        """Minimal in-memory fallback compatible with API usage."""
+        def __init__(self):
+            self.sessions = {}
+        def create_session(self):
+            sid = hashlib.md5(str(datetime.now(timezone.utc)).encode()).hexdigest()
+            self.sessions[sid] = {
+                "session_id": sid,
+                "messages": [],
+                "criteria": {"city": None, "max_price": None, "min_size": None, "commute_target": None},
+                "status": "collecting",
+                "search_results": None,
+            }
+            return sid
+        def get_session(self, session_id):
+            return self.sessions.get(session_id)
+        def add_message(self, session_id, role, content, metadata=None):
+            if session_id not in self.sessions:
+                return
+            self.sessions[session_id]["messages"].append({
+                "role": role,
+                "content": content,
+                "metadata": metadata or {},
+            })
+        def update_status(self, session_id, status):
+            if session_id in self.sessions:
+                self.sessions[session_id]["status"] = status
+        def format_conversation_history(self, session_id, limit=None):
+            sess = self.sessions.get(session_id)
+            if not sess:
+                return ""
+            msgs = sess["messages"][-limit:] if limit else sess["messages"]
+            return "\n".join(f"{m['role'].upper()}: {m['content']}" for m in msgs)
+        def get_criteria(self, session_id):
+            sess = self.sessions.get(session_id)
+            return sess.get("criteria", {}) if sess else {}
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+AGENT_AVAILABLE = False
+if OPENAI_API_KEY:
+    try:
+        from src.main import run_main_crew  # type: ignore
+        AGENT_AVAILABLE = True
+    except Exception as import_exc:
+        logging.warning("Agent import failed (%s); disabling agent features", import_exc)
+        def run_main_crew(*args, **kwargs):  # type: ignore
+            raise RuntimeError("Agent crew functionality unavailable")
+else:
+    logging.info("OPENAI_API_KEY not set; agent disabled")
+    def run_main_crew(*args, **kwargs):  # type: ignore
+        raise RuntimeError("Agent crew functionality unavailable (no OPENAI_API_KEY)")
 
 app = FastAPI(title="Listings API")
 
@@ -39,7 +106,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-load_dotenv()  # Load environment variables from .env if present
+# (Already loaded .env earlier) -- do not reload here to avoid side-effects
 init_db()  # Ensure tables exist on startup
 
 # Load API keys from environment
@@ -960,7 +1027,7 @@ def agent_housing_apply(
         job_id = _create_job(session_id=None, job_type="apply")
         background_tasks.add_task(_run_apply_task, job_id, payload)
 
-        started_msg = "已開始代填申請表，這可能需要一分鐘..."
+        started_msg = "Application process started in background."
         return JSONResponse(
             status_code=http_status.HTTP_202_ACCEPTED,
             content={
@@ -991,6 +1058,30 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
     try:
         # Initialize memory
         memory = ConversationMemory()
+
+        # If agent features are disabled (missing key or import failure), provide a graceful stub response
+        if not AGENT_AVAILABLE:
+            session_id = request.session_id or memory.create_session()
+            if request.message:
+                memory.add_message(session_id, "user", request.message)
+            agent_reply = (
+                "Conversational agent unavailable: missing or invalid configuration (e.g. OPENAI_API_KEY)."
+            )
+            memory.add_message(session_id, "assistant", agent_reply)
+            return JSONResponse(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "success": False,
+                    "session_id": session_id,
+                    "error": agent_reply,
+                    "criteria": memory.get_criteria(session_id),
+                    "is_complete": False,
+                    "status": "agent_unavailable",
+                    "agent_available": False,
+                    "listings": None,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
 
         session_id = request.session_id
         message = request.message
@@ -1062,6 +1153,7 @@ def agent_housing_chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # Execute the conversation agent
         logging.info(f"Processing conversation for session {session_id}")
         logging.info(f"Current criteria: {current_criteria}")
+        # Run the real agent (requires OPENAI_API_KEY)
         result = run_main_crew("conversation", crew_inputs, streamlit_callback=None)
 
         # result
@@ -1262,7 +1354,6 @@ def list_conversation_sessions(limit: int = 10):
             "sessions": sessions,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-
     except Exception as e:
         logging.error(f"Error listing sessions: {e}", exc_info=True)
         return {
@@ -1270,6 +1361,16 @@ def list_conversation_sessions(limit: int = 10):
             "error": str(e),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+
+@app.get("/health")
+def health():
+    """Simple health check endpoint including agent availability."""
+    return {
+        "status": "ok",
+        "agent_available": AGENT_AVAILABLE,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/agent/housing/session/{session_id}")
