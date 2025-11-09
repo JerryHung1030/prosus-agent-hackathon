@@ -14,6 +14,7 @@ const GOOGLE_MAPS_API_KEY = "AIzaSyBWFfsY7vVUGNEtNLd9xT7gZfuOs3EBIPM";
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const DEFAULT_CENTER = { lat: 52.3676, lng: 4.9041 };
 const COUNTRY_CONTEXT = "Netherlands";
+const USE_AGENT_LISTINGS_ONLY = true; // When true, only show agent-picked listings
 
 type Coordinates = { lat: number; lng: number };
 
@@ -233,20 +234,30 @@ const MapView = ({ preferences }: MapViewProps) => {
       setIsPinsLoading(true);
       setErrorMessage(null);
       try {
-        const url = new URL(`${BACKEND_BASE_URL}/listings`);
-        url.searchParams.set("lat", mapCenter.lat.toFixed(6));
-        url.searchParams.set("lng", mapCenter.lng.toFixed(6));
-        url.searchParams.set("radius", radiusKm.toFixed(2));
-        url.searchParams.set("all", "true");
-        if (minPrice !== undefined) url.searchParams.set("min_price", String(Math.round(minPrice)));
-        if (maxPrice !== undefined) url.searchParams.set("max_price", String(Math.round(maxPrice)));
-        if (petsAllowed !== undefined) url.searchParams.set("pets_allowed", petsAllowed ? "true" : "false");
-        if (minArea !== undefined) url.searchParams.set("min_area", String(Math.round(minArea)));
+        let items: ListingRecord[] = [];
 
-        const response = await fetch(url.toString(), { signal: controller.signal });
-        if (!response.ok) throw new Error(`Failed to fetch listings (${response.status})`);
-        const payload = (await response.json()) as { items?: ListingRecord[] };
-        const items = Array.isArray(payload.items) ? payload.items : [];
+        // If agent has picked listings for the user, use those exclusively
+        const agentListings = preferences.last_search_results;
+        if (USE_AGENT_LISTINGS_ONLY && agentListings && Array.isArray(agentListings) && agentListings.length > 0) {
+          console.log(`🎯 Using ${agentListings.length} agent-picked listings`);
+          items = agentListings;
+        } else {
+          // Fallback: fetch all listings from the API with filters
+          const url = new URL(`${BACKEND_BASE_URL}/listings`);
+          url.searchParams.set("lat", mapCenter.lat.toFixed(6));
+          url.searchParams.set("lng", mapCenter.lng.toFixed(6));
+          url.searchParams.set("radius", radiusKm.toFixed(2));
+          url.searchParams.set("all", "true");
+          if (minPrice !== undefined) url.searchParams.set("min_price", String(Math.round(minPrice)));
+          if (maxPrice !== undefined) url.searchParams.set("max_price", String(Math.round(maxPrice)));
+          if (petsAllowed !== undefined) url.searchParams.set("pets_allowed", petsAllowed ? "true" : "false");
+          if (minArea !== undefined) url.searchParams.set("min_area", String(Math.round(minArea)));
+
+          const response = await fetch(url.toString(), { signal: controller.signal });
+          if (!response.ok) throw new Error(`Failed to fetch listings (${response.status})`);
+          const payload = (await response.json()) as { items?: ListingRecord[] };
+          items = Array.isArray(payload.items) ? payload.items : [];
+        }
 
         const nextPins = items
           .map((item) => {
@@ -297,7 +308,7 @@ const MapView = ({ preferences }: MapViewProps) => {
       controller.abort();
       window.clearTimeout(timeoutId);
     };
-  }, [filters, mapCenter.lat, mapCenter.lng, radiusKm, reloadToken]);
+  }, [filters, mapCenter.lat, mapCenter.lng, radiusKm, reloadToken, preferences.last_search_results]);
 
   const handleMarkerClick = useCallback(async (pin: ListingPin) => {
     setSelectedPin(pin);
@@ -328,8 +339,17 @@ const MapView = ({ preferences }: MapViewProps) => {
     <Card className="h-full flex flex-col glass glass-dark">
       <div className="p-4 border-b">
         <div className="flex items-center justify-between">
-          <h3 className="font-semibold text-lg">Available Listings</h3>
+          <h3 className="font-semibold text-lg">
+            {USE_AGENT_LISTINGS_ONLY && preferences.last_search_results?.length 
+              ? "Agent-Picked Listings" 
+              : "Available Listings"}
+          </h3>
           <div className="flex items-center gap-2">
+            {USE_AGENT_LISTINGS_ONLY && preferences.last_search_results?.length && (
+              <Badge variant="default" className="glass glass-dark flex items-center gap-1 bg-primary/20 text-primary">
+                🤖 Agent Selection ({preferences.last_search_results.length})
+              </Badge>
+            )}
             <Badge variant="secondary" className="glass glass-dark flex items-center gap-1">
               <MapPin className="h-3.5 w-3.5" />
               {areaLabel}

@@ -10,13 +10,13 @@ services:
       - ./src:/app/src
       - ./backend/data:/data
       - ./images:/app/images
+      - ./output:/app/output
     env_file:
       - .env
     environment:
       PYTHONUNBUFFERED: "1"
       DB_PATH: /data/housing.db
     restart: unless-stopped
-
   scraper:
     build:
       context: .
