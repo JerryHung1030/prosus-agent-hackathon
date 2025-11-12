@@ -109,4 +109,5 @@ export const ListingCard = ({ listing, onApply, isPending = false }: ListingCard
       </div>
     </Card>
   );
-};
+}; 
+"contributed to this project in the UI and agentic parts, my code was uploaded by my friends - I had some git issues that I couldnt resolve on time"
